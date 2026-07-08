@@ -1,0 +1,40 @@
+{
+  "// NOTE": "Merge these keys into ~/.claude/settings.json. Replace the path.",
+  "// PATH": "Swap /path/to/claude-frog/claude_frog.py for the real absolute path.",
+
+  "statusLine": {
+    "type": "command",
+    "command": "python3 /path/to/claude-frog/claude_frog.py statusline"
+  },
+
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          { "type": "command", "command": "python3 /path/to/claude-frog/claude_frog.py hook" }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          { "type": "command", "command": "python3 /path/to/claude-frog/claude_frog.py hook" }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          { "type": "command", "command": "python3 /path/to/claude-frog/claude_frog.py hook" }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          { "type": "command", "command": "python3 /path/to/claude-frog/claude_frog.py hook" }
+        ]
+      }
+    ]
+  }
+}

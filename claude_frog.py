@@ -63,13 +63,14 @@ CACHE_DIR = os.path.join(
 # Dusty-rose plushie frog with peach eyes. None == transparent (terminal bg).
 
 RGB = {
-    "O": (0x5a, 0x32, 0x3c),   # outline / dark rose
+    "O": (0x53, 0x2e, 0x39),   # outline / dark rose
     "B": (0xdb, 0x8d, 0x8f),   # body pink (the signature dusty rose)
-    "b": (0xe8, 0xac, 0xac),   # belly / highlight pink
-    "E": (0xf2, 0xc0, 0x92),   # eye whites (peach)
-    "P": (0x36, 0x24, 0x2c),   # pupils
-    "M": (0x8a, 0x45, 0x52),   # mouth line
-    "S": (0xf1, 0xcf, 0xcf),   # stitch thread (stuffed-animal seam)
+    "W": (0xf6, 0xf5, 0xf1),   # eye whites (South Park Clyde-Frog eyes)
+    "P": (0x1e, 0x18, 0x1c),   # pupils (near-black)
+    "N": (0xe0, 0x3a, 0x82),   # open-mouth interior (magenta grin)
+    "R": (0xd6, 0x38, 0x40),   # tongue (red)
+    "M": (0x53, 0x2e, 0x39),   # closed-eye / mouth line (== outline)
+    "s": (0x4a, 0x28, 0x34),   # stitch thread (stuffed-animal seam)
     " ": None,
     ".": None,
 }
@@ -81,41 +82,37 @@ RGB = {
 # seam so he reads as a stuffed animal.
 
 _FROG_SRC = [
-    "   OO       OO   ",
-    "  OEEO     OEEO  ",
-    "  OEPEO   OEPEO  ",
-    "  OEEEO   OEEEO  ",
-    "  OOEOOOOOOOEOO  ",
-    "  OBBBBBBBBBBBO  ",
-    " OBBBBBBBBBBBBBO ",
-    " OBSBBBBBBBBBSBO ",
-    " OBBBBBBBBBBBBBO ",
-    " OBBOMMMMMMMOBBO ",
-    " OBBBOOOOOOOBBBO ",
-    "  ObbbbbbbbbbbO  ",
-    "  OObbbbbbbbbOO  ",
-    "  OO OO   OO OO  ",
-    " OOO OOO OOO OOO ",
+    "  OWWO       OWWO  ",   # big round eyes on top
+    " OWWPWO     OWWPWO ",   # pupils
+    "  OWWOOOOOOOOOWWO  ",   # eyes settle onto a wide head
+    "  OBBOWWWWWWWOBBO  ",   # grin: white-rimmed
+    "  OBBONNNRNNNOBBO  ",   # magenta mouth + red tongue
+    " OBBBBOOOOOOOBBBBO ",   # grin bottom, arms spread
+    "OBBBBBBBBsBBBBBBBBO",   # body + Frankenstein stitch seam
+    "OBBBBBBBsssBBBBBBBO",   # stitch crossbar
+    " OBBBBBBBsBBBBBBBO ",   # body
+    "  OBBO       OBBO  ",   # floppy legs
+    "  OOO         OOO  ",   # feet
 ]
 
-# Blink overlay: eye rows collapse to a happy closed line.
+# Blink overlay: the big eyes squeeze shut to happy little arcs.
 _FROG_BLINK = {
-    1: "  OOOO     OOOO  ",
-    2: "  O__O     O__O  ",
-    3: "                 ",
+    0: "                   ",
+    1: "  O__O       O__O  ",
 }
 
 # Compact "mood frog" for the statusline (3 char-rows == 6px tall).
 _CHIBI_SRC = [
-    "  OO     OO  ",
-    " OEPO   OEPO ",
-    " OOBOOOOOBOO ",
-    "OBBBBBBBBBBBO",
-    "OBBOMMMMMOBBO",
-    " OObbbbbbbOO ",
+    " OWWO     OWWO ",   # eyes
+    " OWPWOOOOOWPWO ",   # pupils + head bridge
+    "OBBONNNNNNNOBBO",   # magenta grin
+    "OBBBOOOROOOBBBO",   # tongue + grin bottom
+    " OBBBBBsBBBBBO ",   # body + stitch
+    "  OOO     OOO  ",   # feet
 ]
 _CHIBI_BLINK = {
-    1: " O--O   O--O ",
+    0: "               ",
+    1: " O__O     O__O ",
 }
 
 Pixel = tuple  # (r, g, b) or None
@@ -776,8 +773,8 @@ def mode_cleanup(opts):
     sys.exit(0)
 
 
-_SHADE = {"O": "#", "B": "@", "b": "o", "E": "*", "P": ".", "M": "-", "S": "+",
-          " ": " ", ".": " "}
+_SHADE = {"O": "#", "B": "@", "W": "o", "P": ".", "N": "%", "R": "v",
+          "M": "-", "s": "+", " ": " ", ".": " "}
 
 
 def mode_preview(opts):

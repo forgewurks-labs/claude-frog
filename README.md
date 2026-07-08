@@ -124,5 +124,5 @@ python3 claude_frog.py dance --party      # watch him lose it (Ctrl-C to stop)
 ## Composing with an existing statusline
 
 Only one `statusLine` command is allowed, so if you already run one, wrap both.
-See [`install/statusline-with-governor.sh`](install/statusline-with-governor.sh)
-for an example that stacks another gauge on top of the frog.
+See [`install/statusline-compose.sh`](install/statusline-compose.sh) for a small
+wrapper that stacks your existing statusline on top of the frog.

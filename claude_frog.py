@@ -13,9 +13,8 @@ past ~150k tokens he starts to shake — an honest "you're deep in it, quality's
 about to soften" tell. Calm below ~40k, mostly unhinged by ~100k, full chaos by
 ~120k.
 
-Design discipline (borrowed from agent-governor's sensor path): the statusline
-and hook paths NEVER crash and always exit 0 — a broken frog must never break
-your prompt. Imports stay light (stdlib only).
+Design discipline: the statusline and hook paths NEVER crash and always exit 0
+— a broken frog must never break your prompt. Imports stay light (stdlib only).
 
 See README.md for install. Everything below is tunable via the constants block.
 """

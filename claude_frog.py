@@ -538,7 +538,7 @@ def mode_dance(opts):
 
 
 # --------------------------------------------------------------------------- #
-# Mode: statusline  (compact mood frog + writes token gauge to state)          #
+# Modes: tap (silent token gauge) + statusline (mood frog on top of the tap)   #
 # --------------------------------------------------------------------------- #
 
 
@@ -566,23 +566,44 @@ def _extract_tokens(payload):
     return tot if got else None
 
 
-def mode_statusline():
-    try:
-        raw = sys.stdin.read()
-        payload = json.loads(raw) if raw.strip() else {}
-    except Exception:
-        payload = {}
+def _tap(payload=None):
+    """Read the statusline payload and publish the token gauge to session state.
+
+    The statusline is the only surface Claude Code hands token usage to — hooks
+    are token-blind — so this is the sole source of the pane daemon's gauge.
+    Returns (session, tokens); tokens is None if the payload didn't carry any.
+    """
+    if payload is None:
+        try:
+            raw = sys.stdin.read()
+            payload = json.loads(raw) if raw.strip() else {}
+        except Exception:
+            payload = {}
 
     session = (payload.get("session_id") or payload.get("sessionId") or "default")
-    tokens = None
     try:
         tokens = _extract_tokens(payload)
     except Exception:
         tokens = None
 
-    # tap: write token gauge to state for the pane daemon to read
     if tokens is not None:
         _write_json(_paths(session)[1], {"tokens": tokens, "ts": time.time()})
+    return session, tokens
+
+
+def mode_tap():
+    """Feed the gauge, render nothing.
+
+    For a pane-only setup: keep the frog out of your status bar while the
+    dancing pane still gets honest token-driven goofiness and shake. Wire it in
+    as a statusLine command whose output you discard (or append to your own).
+    """
+    _tap()
+    sys.exit(0)
+
+
+def mode_statusline():
+    session, tokens = _tap()
 
     state, turns = _read_think(session)
     active = state == "thinking"
@@ -829,6 +850,8 @@ def main():
             mode_dance(opts)
         elif mode == "statusline":
             mode_statusline()
+        elif mode == "tap":
+            mode_tap()
         elif mode == "hook":
             mode_hook(opts)
         elif mode == "toggle":
@@ -846,7 +869,7 @@ def main():
         raise
     except Exception:
         # never crash the statusline / hook paths
-        if mode in ("statusline", "hook"):
+        if mode in ("statusline", "tap", "hook"):
             sys.exit(0)
         raise
 

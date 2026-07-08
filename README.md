@@ -64,10 +64,28 @@ And the tmux toggle keybind (see
 bind F run-shell "python3 /path/to/claude-frog/claude_frog.py toggle"
 ```
 
-The pane version needs the token gauge from the statusline, so **install both**
-to get the honest danger-zone signal in the pane. Pane-only (no statusline)
-still works — he just falls back to ramping his goofiness on turn count instead
-of tokens (unhinged by turn 4).
+### 🤫 Pane-only, but still honest (`tap`)
+
+Only the statusline is handed your token usage — the hooks are blind to it. So
+if you want the dancing pane *without* a frog sitting in your status bar, don't
+just drop the statusline: he'd fall back to guessing from turn count and you'd
+lose the shake entirely.
+
+Use `tap` instead. It reads the same payload and publishes the token gauge for
+the pane, and prints **nothing**:
+
+```json
+{
+  "statusLine": {
+    "type": "command",
+    "command": "python3 /path/to/claude-frog/claude_frog.py tap"
+  }
+}
+```
+
+Already have a statusline of your own? Keep it, and set `FROG_MODE="tap"` in
+[`install/statusline-compose.sh`](install/statusline-compose.sh) — your bar
+renders exactly as before, and the pane frog stays fully calibrated.
 
 ---
 
@@ -96,14 +114,15 @@ Flags: `--party` pins him to max goofiness + shake (always dancing);
 ```
 UserPromptSubmit / Stop hooks ─┐
                                ├─► ~/.cache/claude-frog/<session>.think   (dance vs idle, turn count)
-   statusline (each refresh) ──┼─► ~/.cache/claude-frog/<session>.ctx     (absolute context tokens)
-                               │
+ statusline / tap (each ───────┼─► ~/.cache/claude-frog/<session>.ctx     (absolute context tokens)
+   statusline refresh)         │
         pane daemon (12fps) ◄──┘   reads both, renders the frog
 ```
 
 - **Hooks** own the *think-state* (they can't see tokens).
 - **The statusline** owns the *token gauge* (only it can see tokens) and writes
-  them to a file the daemon reads.
+  it to a file the daemon reads — `statusline` does that *and* draws a frog,
+  `tap` does only the writing.
 - Everything is keyed by session id, so multiple Claude Code sessions each get
   their own independent frog.
 - The statusline and hook paths **never crash and always exit 0** — a broken

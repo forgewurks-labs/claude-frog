@@ -21,15 +21,26 @@ FROG="/path/to/claude-frog/claude_frog.py"
 # same JSON on stdin). Leave empty to show only the frog.
 YOUR_STATUSLINE=""
 
+# "statusline" draws the 3-row mood frog here in your status bar.
+# "tap" draws nothing — use it for a pane-only setup where the frog dances in
+# tmux and you want your status bar left alone. Either way the token gauge gets
+# published, because the statusline is the only place Claude Code reveals it.
+FROG_MODE="statusline"
+
 payload="$(cat)"
 
 # --- top line(s): your existing statusline, if any ---
-if [ -n "$YOUR_STATUSLINE" ]; then
+if [ -n "$YOUR_STATUSLINE" ] && [ "$FROG_MODE" != "tap" ]; then
   printf '%s' "$payload" | $YOUR_STATUSLINE 2>/dev/null || true
   printf '\n'
 fi
 
-# --- below: the frog ---
-printf '%s' "$payload" | python3 "$FROG" statusline 2>/dev/null || true
+# --- below: the frog (silent when FROG_MODE=tap) ---
+printf '%s' "$payload" | python3 "$FROG" "$FROG_MODE" 2>/dev/null || true
+
+# in tap mode nothing has been printed yet, so your statusline owns the bar
+if [ -n "$YOUR_STATUSLINE" ] && [ "$FROG_MODE" = "tap" ]; then
+  printf '%s' "$payload" | $YOUR_STATUSLINE 2>/dev/null || true
+fi
 
 exit 0

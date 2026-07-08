@@ -60,9 +60,8 @@ And the tmux toggle keybind (see
 [`install/tmux.conf.snippet`](install/tmux.conf.snippet)):
 
 ```tmux
-# prefix + f  →  hide / summon the frog     (F relocates the old find-window)
-bind f run-shell "python3 /path/to/claude-frog/claude_frog.py toggle"
-bind F command-prompt "find-window '%%'"
+# prefix + F  →  hide / summon the frog   (capital F; find-window stays on f)
+bind F run-shell "python3 /path/to/claude-frog/claude_frog.py toggle"
 ```
 
 The pane version needs the token gauge from the statusline, so **install both**

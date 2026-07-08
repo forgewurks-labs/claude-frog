@@ -4,9 +4,6 @@
 #
 # Replace the path below with the real absolute path to claude_frog.py.
 
-# prefix + f  →  hide / summon the frog for the current session
-bind f run-shell "python3 /path/to/claude-frog/claude_frog.py toggle"
-
-# The default 'f' was find-window; relocate it to capital F so nothing is lost.
-# (f = frog, F = find — remove this line if you never used find-window.)
-bind F command-prompt -p "(find-window)" "find-window -- '%%'"
+# prefix + F  →  hide / summon the frog for the current session
+# Capital F is the frog's, by royal decree. Lowercase f stays find-window.
+bind F run-shell "python3 /path/to/claude-frog/claude_frog.py toggle"

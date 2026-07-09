@@ -60,17 +60,14 @@ CACHE_DIR = os.path.join(
 # --------------------------------------------------------------------------- #
 # Palette                                                                      #
 # --------------------------------------------------------------------------- #
-# Dusty-rose plushie frog with peach eyes. None == transparent (terminal bg).
+# Emoji-frog green with dark inset eyes. None == transparent (terminal bg).
 
 RGB = {
-    "O": (0x53, 0x2e, 0x39),   # outline / dark rose
-    "B": (0xdb, 0x8d, 0x8f),   # body pink (the signature dusty rose)
-    "W": (0xf6, 0xf5, 0xf1),   # eye whites (South Park Clyde-Frog eyes)
-    "P": (0x1e, 0x18, 0x1c),   # pupils (near-black)
-    "N": (0xe0, 0x3a, 0x82),   # open-mouth interior (magenta grin)
-    "R": (0xd6, 0x38, 0x40),   # tongue (red)
-    "M": (0x53, 0x2e, 0x39),   # closed-eye / mouth line (== outline)
-    "s": (0x4a, 0x28, 0x34),   # stitch thread (stuffed-animal seam)
+    "O": (0x2f, 0x4a, 0x1e),   # outline / deep leaf green
+    "B": (0x9d, 0xc8, 0x3b),   # body (the signature yellow-green)
+    "P": (0x2b, 0x2b, 0x2f),   # eyes / nostrils (near-black)
+    "N": (0xf5, 0xe9, 0xcf),   # open-mouth interior (warm cream)
+    "M": (0x2f, 0x4a, 0x1e),   # closed-eye / mouth line (== outline)
     " ": None,
     ".": None,
 }
@@ -78,41 +75,42 @@ RGB = {
 # --------------------------------------------------------------------------- #
 # Sprites (authored ragged; padded to a rectangle at load time)               #
 # --------------------------------------------------------------------------- #
-# Clyde-Frog spirit: bulgy eyes riding on top, wide grin, haunches, a stitch
-# seam so he reads as a stuffed animal.
+# Emoji-frog spirit: two eye bumps riding on a wide round head, dark inset eyes,
+# nostril dots, and a big open grin. No seams — he's a frog, not a plushie.
 
 _FROG_SRC = [
-    "  OWWO       OWWO  ",   # big round eyes on top
-    " OWWPWO     OWWPWO ",   # pupils
-    "  OWWOOOOOOOOOWWO  ",   # eyes settle onto a wide head
-    "  OBBOWWWWWWWOBBO  ",   # grin: white-rimmed
-    "  OBBONNNRNNNOBBO  ",   # magenta mouth + red tongue
-    " OBBBBOOOOOOOBBBBO ",   # grin bottom, arms spread
-    "OBBBBBBBBsBBBBBBBBO",   # body + Frankenstein stitch seam
-    "OBBBBBBBsssBBBBBBBO",   # stitch crossbar
-    " OBBBBBBBsBBBBBBBO ",   # body
-    "  OBBO       OBBO  ",   # floppy legs
+    "  OOOO       OOOO  ",   # tops of the two eye bumps
+    " OBPPBO     OBPPBO ",   # dark inset eyes
+    " OBPPBOOOOOOOBPPBO ",   # bumps settle onto a wide head
+    "OBBBBBBBBBBBBBBBBBO",   # brow
+    "OBBBBPBBBBBBBPBBBBO",   # nostrils
+    "OBBBBBBBBBBBBBBBBBO",   # cheeks
+    "OBBOOOOOOOOOOOOOBBO",   # grin: top lip
+    "OBBONNNNNNNNNNNOBBO",   # open mouth
+    "OBBBOOOOOOOOOOOBBBO",   # grin: bottom lip curves up
+    " OBBBBBBBBBBBBBBBO ",   # jaw / body
+    "  OBBO       OBBO  ",   # legs
     "  OOO         OOO  ",   # feet
 ]
 
-# Blink overlay: the big eyes squeeze shut to happy little arcs.
+# Blink overlay: the eyes squeeze shut to happy little arcs.
 _FROG_BLINK = {
-    0: "                   ",
-    1: "  O__O       O__O  ",
+    1: " OBBBBO     OBBBBO ",
+    2: " OB__BOOOOOOOB__BO ",
 }
 
 # Compact "mood frog" for the statusline (3 char-rows == 6px tall).
 _CHIBI_SRC = [
-    " OWWO     OWWO ",   # eyes
-    " OWPWOOOOOWPWO ",   # pupils + head bridge
-    "OBBONNNNNNNOBBO",   # magenta grin
-    "OBBBOOOROOOBBBO",   # tongue + grin bottom
-    " OBBBBBsBBBBBO ",   # body + stitch
-    "  OOO     OOO  ",   # feet
+    " OOOO     OOOO ",   # eye bumps
+    " OPPO     OPPO ",   # eyes
+    "OBPPBOOOOOBPPBO",   # head bridge
+    "OBBOOOOOOOOOBBO",   # top lip
+    "OBBBONNNNNOBBBO",   # open mouth
+    " OBBBOOOOOBBBO ",   # bottom lip / jaw
 ]
 _CHIBI_BLINK = {
-    0: "               ",
-    1: " O__O     O__O ",
+    1: " OBBO     OBBO ",
+    2: "OB__BOOOOOB__BO",
 }
 
 Pixel = tuple  # (r, g, b) or None
@@ -177,9 +175,9 @@ def squash(grid, drop):
     if drop <= 0:
         return grid
     h = len(grid)
-    # remove rows just above the legs (mid-body) so eyes+feet stay put
+    # remove rows just above the legs (mid-body) so face+feet stay put
     remove = set()
-    mid = h - 5
+    mid = h - 3
     for i in range(drop):
         r = mid - i
         if 0 < r < h - 2:
@@ -794,8 +792,7 @@ def mode_cleanup(opts):
     sys.exit(0)
 
 
-_SHADE = {"O": "#", "B": "@", "W": "o", "P": ".", "N": "%", "R": "v",
-          "M": "-", "s": "+", " ": " ", ".": " "}
+_SHADE = {"O": "#", "B": "@", "P": ".", "N": "%", "M": "-", " ": " ", ".": " "}
 
 
 def mode_preview(opts):

@@ -8,9 +8,8 @@ the goofier he gets. Past ~150k tokens he starts to shake. So his mood is an
 honest, glanceable gauge: **calm = you're fine; unhinged = quality's about to
 soften, wrap it up or `/compact` soon.**
 
-He's the dusty-rose pixel guy from Claude Code, restyled into a stuffed frog in
-the spirit of a certain pink plush amphibian. Bulgy eyes, wide grin, stitched
-seams, tiny haunches.
+He's the 🐸 emoji as pixel art: yellow-green, two eye bumps riding on a wide
+round head, dark inset eyes, nostril dots, and a big open grin.
 
 It's a self-inflicted CPU tax. That's the point. He's worth it.
 

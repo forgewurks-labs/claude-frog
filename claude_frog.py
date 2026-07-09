@@ -58,6 +58,7 @@ LAYOUTS = {
     "right": ("-h", 24),
     "left": ("-h", 24),
 }
+DEFAULT_LAYOUT = "top"
 
 # Fallback goofiness when no token data is available (pane-only friend with no
 # statusline feeding tokens): ramp on turn count instead — unhinged by turn 4.
@@ -656,7 +657,7 @@ def _in_tmux():
     return bool(os.environ.get("TMUX"))
 
 
-def _spawn_pane(session, layout="bottom"):
+def _spawn_pane(session, layout=DEFAULT_LAYOUT):
     if not _in_tmux():
         return
     think_path, _, pane_path = _paths(session)
@@ -674,7 +675,7 @@ def _spawn_pane(session, layout="bottom"):
     cmd = f"exec {py} {here} dance --session {session}"
     # -b puts the new pane *before* the current one: above it for a vertical
     # split, left of it for a horizontal one.
-    axis, size = LAYOUTS.get(layout, LAYOUTS["bottom"])
+    axis, size = LAYOUTS.get(layout, LAYOUTS[DEFAULT_LAYOUT])
     before = ["-b"] if layout in ("top", "left") else []
     split = ["split-window", axis, *before, "-l", str(size), "-d",
              "-P", "-F", "#{pane_id}", cmd]
@@ -744,7 +745,7 @@ def mode_hook(opts):
         _prune_stale()
         _, turns = _read_think(session)
         _write_json(think_path, {"state": "idle", "turns": 0, "ts": time.time()})
-        _spawn_pane(session, opts.get("layout", "bottom"))
+        _spawn_pane(session, opts.get("layout", DEFAULT_LAYOUT))
     elif event == "UserPromptSubmit":
         _, turns = _read_think(session)
         _write_json(think_path, {"state": "thinking", "turns": turns + 1,
@@ -784,14 +785,14 @@ def mode_toggle(opts):
     if os.path.exists(pane_path):
         _kill_pane(session)
     else:
-        _spawn_pane(session, opts.get("layout", "bottom"))
+        _spawn_pane(session, opts.get("layout", DEFAULT_LAYOUT))
     sys.exit(0)
 
 
 def mode_pane(opts):
     session = opts.get("session") or "default"
     _write_json(_paths(session)[0], {"state": "idle", "turns": 0, "ts": time.time()})
-    _spawn_pane(session, opts.get("layout", "bottom"))
+    _spawn_pane(session, opts.get("layout", DEFAULT_LAYOUT))
     sys.exit(0)
 
 
@@ -850,9 +851,9 @@ def _parse(argv):
     if opts["layout"] is None:
         # env lets the hook and the tmux toggle keybind agree on a layout
         # without threading --layout through both call sites
-        opts["layout"] = os.environ.get("CLAUDE_FROG_LAYOUT") or "bottom"
+        opts["layout"] = os.environ.get("CLAUDE_FROG_LAYOUT") or DEFAULT_LAYOUT
     if opts["layout"] not in LAYOUTS:
-        opts["layout"] = "bottom"
+        opts["layout"] = DEFAULT_LAYOUT
     return mode, opts
 
 

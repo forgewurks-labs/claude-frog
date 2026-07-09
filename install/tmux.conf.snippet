@@ -9,5 +9,6 @@
 bind F run-shell "python3 /path/to/claude-frog/claude_frog.py toggle"
 
 # Where he lives: top | bottom (7-line strip) or left | right (24-col tower).
-# Set here so the keybind and the SessionStart hook agree; --layout overrides.
-set-environment -g CLAUDE_FROG_LAYOUT top
+# `top` is the default; uncomment and edit to move him. Set here (not via
+# --layout) so the keybind and the SessionStart hook agree on one answer.
+# set-environment -g CLAUDE_FROG_LAYOUT bottom

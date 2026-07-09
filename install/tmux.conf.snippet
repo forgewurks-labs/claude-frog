@@ -7,3 +7,7 @@
 # prefix + F  →  hide / summon the frog for the current session
 # Capital F is the frog's, by royal decree. Lowercase f stays find-window.
 bind F run-shell "python3 /path/to/claude-frog/claude_frog.py toggle"
+
+# Where he lives: top | bottom (7-line strip) or left | right (24-col tower).
+# Set here so the keybind and the SessionStart hook agree; --layout overrides.
+set-environment -g CLAUDE_FROG_LAYOUT top

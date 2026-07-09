@@ -48,6 +48,17 @@ SHAKE_MAX_PX = 3              # max jitter in pixels (kept subtle/readable)
 FPS_ACTIVE = 12.0             # dancing (a turn is running)
 FPS_IDLE = 4.0                # idling (between turns)
 
+# Pane layouts: name -> (tmux split axis, size). Vertical splits are sized in
+# lines, horizontal ones in columns. `top`/`left` place the pane before the
+# current one; `bottom`/`right` after it. He always stands on the pane's floor,
+# so a top pane puts him directly above your prompt, facing down at your work.
+LAYOUTS = {
+    "bottom": ("-v", 7),
+    "top": ("-v", 7),
+    "right": ("-h", 24),
+    "left": ("-h", 24),
+}
+
 # Fallback goofiness when no token data is available (pane-only friend with no
 # statusline feeding tokens): ramp on turn count instead — unhinged by turn 4.
 FALLBACK_UNHINGED_TURNS = 4
@@ -520,11 +531,10 @@ def mode_dance(opts):
 
             blit(stage, sprite, base_x, base_y)
 
-            frame_rows = render_pixels(stage)
-            buf = ["\x1b[H"]
-            for r in frame_rows[:rows]:
-                buf.append(r + "\x1b[K\n")
-            out.write("".join(buf))
+            # No trailing newline: emitting one on the bottom row scrolls the
+            # pane, which would lift him a row off the floor he stands on.
+            frame_rows = [r + "\x1b[K" for r in render_pixels(stage)[:rows]]
+            out.write("\x1b[H" + "\n".join(frame_rows))
             out.flush()
 
             fps = FPS_ACTIVE if active else FPS_IDLE
@@ -662,10 +672,12 @@ def _spawn_pane(session, layout="bottom"):
     py = sys.executable or "python3"
     here = os.path.abspath(__file__)
     cmd = f"exec {py} {here} dance --session {session}"
-    if layout == "right":
-        split = ["split-window", "-h", "-l", "24", "-d", "-P", "-F", "#{pane_id}", cmd]
-    else:
-        split = ["split-window", "-v", "-l", "7", "-d", "-P", "-F", "#{pane_id}", cmd]
+    # -b puts the new pane *before* the current one: above it for a vertical
+    # split, left of it for a horizontal one.
+    axis, size = LAYOUTS.get(layout, LAYOUTS["bottom"])
+    before = ["-b"] if layout in ("top", "left") else []
+    split = ["split-window", axis, *before, "-l", str(size), "-d",
+             "-P", "-F", "#{pane_id}", cmd]
     r = _tmux(*split)
     if r and r.returncode == 0:
         _write_json_raw(pane_path, (r.stdout or "").strip())
@@ -815,7 +827,7 @@ def mode_preview(opts):
 
 def _parse(argv):
     mode = argv[0] if argv else "statusline"
-    opts = {"session": None, "layout": "bottom", "always": False,
+    opts = {"session": None, "layout": None, "always": False,
             "party": False, "which": "frog", "event": None}
     i = 1
     while i < len(argv):
@@ -835,6 +847,12 @@ def _parse(argv):
         i += 1
     if opts["session"] is None:
         opts["session"] = os.environ.get("CLAUDE_FROG_SESSION")
+    if opts["layout"] is None:
+        # env lets the hook and the tmux toggle keybind agree on a layout
+        # without threading --layout through both call sites
+        opts["layout"] = os.environ.get("CLAUDE_FROG_LAYOUT") or "bottom"
+    if opts["layout"] not in LAYOUTS:
+        opts["layout"] = "bottom"
     return mode, opts
 
 

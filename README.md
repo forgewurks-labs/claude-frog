@@ -103,8 +103,20 @@ long-context quality actually softens, and reads the same whether your window is
 200k or 1M.
 
 Flags: `--party` pins him to max goofiness + shake (always dancing);
-`--layout right` puts the pane in a tall side column instead of a bottom strip;
 `--always-dance` dances regardless of turn state.
+
+### Where the pane goes
+
+`--layout top|bottom|left|right` (default `bottom`). `top`/`bottom` are 7-line
+strips, `left`/`right` are 24-column side towers. He always stands on the pane's
+floor, so `top` perches him directly above your prompt, looking down at your work.
+
+The pane is spawned by the `SessionStart` hook but toggled by the tmux keybind,
+so rather than passing `--layout` to both, set it once:
+
+```sh
+export CLAUDE_FROG_LAYOUT=top
+```
 
 ---
 

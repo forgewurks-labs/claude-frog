@@ -72,14 +72,14 @@ CACHE_DIR = os.path.join(
 # --------------------------------------------------------------------------- #
 # Palette                                                                      #
 # --------------------------------------------------------------------------- #
-# Claude-dude dusty rose with dark inset eyes. None == transparent (terminal bg).
+# Emoji-frog green with dark inset eyes. None == transparent (terminal bg).
 
 RGB = {
-    "O": (0x53, 0x2e, 0x39),   # outline / dark rose
-    "B": (0xdb, 0x8d, 0x8f),   # body (the signature dusty rose)
+    "O": (0x2f, 0x4a, 0x1e),   # outline / deep leaf green
+    "B": (0x9d, 0xc8, 0x3b),   # body (the signature yellow-green)
     "P": (0x2b, 0x2b, 0x2f),   # eyes / nostrils (near-black)
     "N": (0xf5, 0xe9, 0xcf),   # open-mouth interior (warm cream)
-    "M": (0x53, 0x2e, 0x39),   # closed-eye / mouth line (== outline)
+    "M": (0x2f, 0x4a, 0x1e),   # closed-eye / mouth line (== outline)
     " ": None,
     ".": None,
 }
@@ -87,8 +87,8 @@ RGB = {
 # --------------------------------------------------------------------------- #
 # Sprites (authored ragged; padded to a rectangle at load time)               #
 # --------------------------------------------------------------------------- #
-# Emoji-frog shape in Claude-dude colors: two eye bumps riding on a wide round
-# head, dark inset eyes, nostril dots, and a big open grin.
+# Emoji-frog spirit: two eye bumps riding on a wide round head, dark inset eyes,
+# nostril dots, and a big open grin. No seams — he's a frog, not a plushie.
 
 _FROG_SRC = [
     "  OOOO       OOOO  ",   # tops of the two eye bumps

@@ -175,6 +175,8 @@ class TestThemes(unittest.TestCase):
             "md": "genesis",
             "gba": "gba", "GBA": "gba", "Game Boy": "gba", "gameboy": "gba",
             "gb": "gba",
+            "terraria": "terraria", "TERRARIA": "terraria",
+            "Re-Logic": "terraria", "terra": "terraria", "32bit": "terraria",
         }
         for spelling, canon in cases.items():
             self.assertEqual(cf.resolve_theme(spelling), canon, spelling)

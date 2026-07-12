@@ -14,10 +14,11 @@ about to soften" tell. Calm below ~40k, mostly unhinged by ~100k, full chaos by
 ~120k. He also changes color: green when fresh, fading toward Claude pink as
 context fills, fully pink by 200k tokens.
 
-He renders in three console-era styles — `snes` (default, smooth 16-bit
-shading), `genesis` (punchy, dithered Mega Drive), and `gba` (4-tone monochrome
-Game Boy LCD). Pick one per session with `--theme` or `CLAUDE_FROG_THEME`; each
-keeps the green->pink context gauge in its own idiom.
+He renders in four pixel-art styles — `snes` (default, smooth 16-bit shading),
+`genesis` (punchy, dithered Mega Drive), `gba` (4-tone monochrome Game Boy LCD),
+and `terraria` (high-fidelity warm, painterly indie). Pick one per session with
+`--theme` or `CLAUDE_FROG_THEME`; each keeps the green->pink context gauge in its
+own idiom.
 
 Design discipline: the statusline and hook paths NEVER crash and always exit 0
 — a broken frog must never break your prompt. Imports stay light (stdlib only).
@@ -94,7 +95,7 @@ CACHE_DIR = os.path.join(
 # --------------------------------------------------------------------------- #
 # Palette                                                                      #
 # --------------------------------------------------------------------------- #
-# The frog ships in three console-era rendering styles (see THEMES below). The
+# The frog ships in four pixel-art rendering styles (see THEMES below). The
 # default "SNES" frog: instead of the flat two-green NES look, a top-lit shading
 # ramp (highlight -> light -> mid -> shadow -> deep-shadow) gives the head
 # volume, a specular glint lifts the eyes, and the grin gets a lit/shadowed
@@ -198,14 +199,48 @@ GBA_PINK = {
     "N": _GBR_LIGHT, "R": _GBR_DARK, "M": _GBR_DARKEST,
 }
 
+# --- Terraria -------------------------------------------------------------- #
+# The high-fidelity "32-bit" indie look: Terraria's (Re-Logic) hand-painted 2D
+# sandbox art. Where the SNES ramp is cool and smooth, this one is warmer and
+# richer — a fuller earthy grass-green ramp with deep DESATURATED outlines (not
+# pure black, the way Terraria rims its sprites) and creamy warm highlights. The
+# body midtone and its shadow get a subtle cross-hatch DITHER (see THEMES
+# "dither" + _colorize) to fake the painterly gradient shading Terraria layers
+# by hand. Fades from fresh jungle green to a warm Claude rose.
+TERRARIA = {
+    "O": (0x20, 0x2c, 0x18),   # outline — deep desaturated forest (warm, not black)
+    "H": (0xcf, 0xdc, 0x82),   # highlight — warm pale yellow-green catching light
+    "L": (0xa6, 0xc0, 0x58),   # light green (upper face)
+    "B": (0x7a, 0x9c, 0x3e),   # body midtone — warm grass green (dithered)
+    "D": (0x54, 0x74, 0x2e),   # shadow green (dithered)
+    "S": (0x38, 0x52, 0x24),   # deep shadow
+    "P": (0x1b, 0x18, 0x14),   # eyes / nostrils — warm near-black
+    "W": (0xf4, 0xf1, 0xd8),   # eye specular — warm glint
+    "N": (0xf1, 0xd7, 0xa4),   # open-mouth interior, lit — warm cream
+    "R": (0xbe, 0x8f, 0x58),   # open-mouth interior, shadowed
+    "M": (0x20, 0x2c, 0x18),   # closed-eye / mouth line (== outline)
+    " ": None,
+    ".": None,
+}
+TERRARIA_PINK = {
+    "O": (0x3e, 0x1c, 0x2b),   # outline — deep warm rose
+    "H": (0xf7, 0xd2, 0xe1),   # highlight — warm pale pink
+    "L": (0xef, 0xab, 0xc8),   # light pink
+    "B": (0xdd, 0x82, 0xa8),   # body midtone — warm Claude rose
+    "D": (0xb2, 0x5f, 0x86),   # shadow pink
+    "S": (0x7e, 0x42, 0x5e),   # deep shadow
+    "M": (0x3e, 0x1c, 0x2b),   # closed-eye / mouth line (== outline)
+}
+
 # Theme registry. Each theme is (base palette, pink fade target, dither keys).
 # `dither` is the set of palette keys that get cross-hatch shading (Genesis);
 # empty for the smooth-shaded SNES and the flat-LCD GBA. DEFAULT_THEME keeps the
 # original green SNES frog for anyone who never picks one.
 THEMES = {
-    "snes":    {"base": RGB,     "pink": PINK,         "dither": ()},
-    "genesis": {"base": GENESIS, "pink": GENESIS_PINK, "dither": ("B", "L")},
-    "gba":     {"base": GBA,     "pink": GBA_PINK,     "dither": ()},
+    "snes":     {"base": RGB,      "pink": PINK,          "dither": ()},
+    "genesis":  {"base": GENESIS,  "pink": GENESIS_PINK,  "dither": ("B", "L")},
+    "gba":      {"base": GBA,      "pink": GBA_PINK,      "dither": ()},
+    "terraria": {"base": TERRARIA, "pink": TERRARIA_PINK, "dither": ("B", "D")},
 }
 DEFAULT_THEME = "snes"
 
@@ -218,6 +253,7 @@ THEME_ALIASES = {
     "sega": "genesis", "megadrive": "genesis", "mega": "genesis", "md": "genesis",
     "gameboy": "gba", "gameboyadvance": "gba", "gameboyadvanced": "gba",
     "advance": "gba", "gb": "gba", "dmg": "gba",
+    "relogic": "terraria", "terra": "terraria", "32bit": "terraria",
 }
 
 

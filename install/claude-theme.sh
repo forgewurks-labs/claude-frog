@@ -12,9 +12,10 @@
 # Then name a console as the FIRST word after `claude` and that session's frog
 # wears it:
 #
-#     claude SNES      # smooth 16-bit frog   (also: nintendo, super)
-#     claude SEGA      # dithered Genesis frog (also: genesis, megadrive, md)
-#     claude GBA       # mono Game Boy frog    (also: gameboy, "game boy", gb)
+#     claude SNES      # smooth 16-bit frog     (also: nintendo, super)
+#     claude SEGA      # dithered Genesis frog   (also: genesis, megadrive, md)
+#     claude GBA       # mono Game Boy frog      (also: gameboy, "game boy", gb)
+#     claude TERRARIA  # painterly indie frog    (also: relogic, terra, 32bit)
 #
 # Anything else behaves exactly like plain `claude`. And if you never name a
 # theme, the frog stays on the default SNES theme.

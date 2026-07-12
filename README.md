@@ -63,7 +63,7 @@ Start a session and name a console as the first word — that's his theme for th
 session:
 
 ```sh
-claude SEGA              # or SNES, GBA — name none and he wears SNES
+claude SEGA              # or SNES, GBA, TERRARIA — name none and he wears SNES
 ```
 
 Everything that isn't a theme name passes straight through, so `claude`,
@@ -209,15 +209,16 @@ Flags: `--party` pins him to max goofiness + shake (always dancing);
 
 ### Rendering styles (pick per session)
 
-He renders in three console-era styles. All three keep the green→pink context
-gauge — each just expresses it in that console's idiom (the bar under each frog
-is that theme's actual fade, fresh → full window):
+He renders in four pixel-art styles. All keep the green→pink context gauge —
+each just expresses it in that style's idiom (the bar under each frog is that
+theme's actual fade, fresh → full window):
 
 | | Theme | Look |
 |---|---|---|
 | <img src="assets/frog-snes.png" width="220" alt="SNES frog"> | `snes` *(default)* | smooth 16-bit shading ramp, fading to Claude pink |
 | <img src="assets/frog-genesis.png" width="220" alt="Genesis frog"> | `genesis` | punchy, oversaturated Mega Drive palette with cross-hatch **dithering**, fading to hot magenta |
 | <img src="assets/frog-gba.png" width="220" alt="Game Boy frog"> | `gba` | the iconic 4-tone monochrome Game Boy LCD (pea-green), whose tint slides green→rose as context fills |
+| <img src="assets/frog-terraria.png" width="220" alt="Terraria frog"> | `terraria` | high-fidelity, warm & painterly indie look — a fuller earthy ramp with desaturated outlines and **dithered** midtones, fading to a warm rose |
 
 > Screenshots regenerate from the live palettes with `python3 assets/gen_screenshots.py`.
 > How the themes and the launcher work under the hood — and how to add a theme —
@@ -230,6 +231,7 @@ console as the first word:
 claude SNES      # smooth 16-bit frog
 claude SEGA      # dithered Genesis frog
 claude GBA       # mono Game Boy frog
+claude TERRARIA  # painterly indie frog
 ```
 
 That comes from a tiny shell wrapper
@@ -268,7 +270,7 @@ Under the hood it just sets the `CLAUDE_FROG_THEME` env var for that launch — 
 if you'd rather not add a wrapper, set it yourself before starting Claude Code:
 
 ```sh
-export CLAUDE_FROG_THEME=genesis   # or: gba, snes
+export CLAUDE_FROG_THEME=genesis   # or: gba, snes, terraria
 ```
 
 Either way, both the statusline frog and the dancing pane read it (the pane

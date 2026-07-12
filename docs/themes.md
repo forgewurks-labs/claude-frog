@@ -42,9 +42,10 @@ A **theme** is purely a recolor (plus, for one theme, a dither). The registry:
 
 ```python
 THEMES = {
-  "snes":    {"base": RGB,     "pink": PINK,         "dither": ()},
-  "genesis": {"base": GENESIS, "pink": GENESIS_PINK, "dither": ("B", "L")},
-  "gba":     {"base": GBA,     "pink": GBA_PINK,     "dither": ()},
+  "snes":     {"base": RGB,      "pink": PINK,          "dither": ()},
+  "genesis":  {"base": GENESIS,  "pink": GENESIS_PINK,  "dither": ("B", "L")},
+  "gba":      {"base": GBA,      "pink": GBA_PINK,      "dither": ()},
+  "terraria": {"base": TERRARIA, "pink": TERRARIA_PINK, "dither": ("L", "B", "D")},
 }
 DEFAULT_THEME = "snes"
 ```
@@ -58,6 +59,11 @@ DEFAULT_THEME = "snes"
 - **`gba`** — the iconic 4-tone monochrome Game Boy LCD. Many sprite keys
   collapse onto just four greens, flattening the shading into the blocky Game
   Boy look.
+- **`terraria`** — the high-fidelity, warm & painterly indie look. A fuller
+  earthy grass-green ramp with deep *desaturated* outlines (not pure black) and
+  creamy highlights; its `dither` keys (`L`/`B`/`D` — the whole lit midrange) get
+  a heavy cross-hatch, faking the hand-layered gradient shading of Terraria
+  sprites, while the brightest highlight and specular stay clean.
 
 Every theme keeps the green→pink **context gauge**: each carries a `base` (fresh)
 palette and a `pink` fade target, and `palette_for(tokens, theme)` blends between
@@ -84,8 +90,9 @@ from a theme's `base` would render as a transparent hole in the frog.
 ## Selecting a theme
 
 Resolution is case- and punctuation-insensitive via `resolve_theme()` +
-`THEME_ALIASES`, so `SNES`/`nintendo`, `SEGA`/`"Mega Drive"`/`md`, and
-`GBA`/`"Game Boy"`/`gb` all canonicalize. This is honored **everywhere** a theme
+`THEME_ALIASES`, so `SNES`/`nintendo`, `SEGA`/`"Mega Drive"`/`md`,
+`GBA`/`"Game Boy"`/`gb`, and `TERRARIA`/`relogic`/`32bit` all canonicalize. This
+is honored **everywhere** a theme
 is named:
 
 - **`--theme <name>`** on any invocation.

@@ -199,6 +199,32 @@ THEMES = {
 }
 DEFAULT_THEME = "snes"
 
+# Friendly spellings a human might type at the terminal (`claude SEGA`) or set in
+# CLAUDE_FROG_THEME. Canonical names map to themselves via THEMES; everything
+# here is an alias for one. Matching is case- and punctuation-insensitive (see
+# resolve_theme), so "Game Boy", "gameboy", and "GBA" all land on gba.
+THEME_ALIASES = {
+    "supernintendo": "snes", "nintendo": "snes", "super": "snes", "16bit": "snes",
+    "sega": "genesis", "megadrive": "genesis", "mega": "genesis", "md": "genesis",
+    "gameboy": "gba", "gameboyadvance": "gba", "gameboyadvanced": "gba",
+    "advance": "gba", "gb": "gba", "dmg": "gba",
+}
+
+
+def resolve_theme(name):
+    """Canonical theme name for any accepted spelling, or None if unrecognized.
+
+    Case- and punctuation-insensitive: "Game Boy", "gameboy", "GBA" -> "gba".
+    Returns None (not the default) for junk, so callers can tell "no theme
+    named" apart from "use the default" — the shell launcher relies on that.
+    """
+    if not name:
+        return None
+    key = "".join(ch for ch in str(name).lower() if ch.isalnum())
+    if key in THEMES:
+        return key
+    return THEME_ALIASES.get(key)
+
 
 def theme_spec(theme):
     """Resolve a theme name to its spec, falling back to the default."""
@@ -1037,6 +1063,21 @@ def mode_preview(opts):
     sys.exit(0)
 
 
+def mode_resolve_theme(argv):
+    """Print the canonical theme for a spelling and exit 0; exit 1 if unknown.
+
+    The `claude` shell launcher (install/claude-theme.sh) calls this to turn a
+    first arg like "SEGA" into "genesis", and — via the exit code — to decide
+    whether that first arg names a theme at all (vs. a real prompt to pass on).
+    """
+    token = argv[1] if len(argv) > 1 else ""
+    canon = resolve_theme(token)
+    if canon:
+        sys.stdout.write(canon)
+        sys.exit(0)
+    sys.exit(1)
+
+
 # --------------------------------------------------------------------------- #
 # Entry                                                                        #
 # --------------------------------------------------------------------------- #
@@ -1072,12 +1113,11 @@ def _parse(argv):
         opts["layout"] = os.environ.get("CLAUDE_FROG_LAYOUT") or DEFAULT_LAYOUT
     if opts["layout"] not in LAYOUTS:
         opts["layout"] = DEFAULT_LAYOUT
-    if opts["theme"] is None:
-        # env lets the SessionStart hook, the statusline, and the tmux toggle
-        # keybind agree on a theme without threading --theme through each.
-        opts["theme"] = os.environ.get("CLAUDE_FROG_THEME") or DEFAULT_THEME
-    if opts["theme"] not in THEMES:
-        opts["theme"] = DEFAULT_THEME
+    # env lets the SessionStart hook, the statusline, and the tmux toggle
+    # keybind agree on a theme without threading --theme through each. Accept
+    # friendly aliases ("SEGA", "Game Boy") from either source.
+    raw_theme = opts["theme"] or os.environ.get("CLAUDE_FROG_THEME")
+    opts["theme"] = resolve_theme(raw_theme) or DEFAULT_THEME
     return mode, opts
 
 
@@ -1102,6 +1142,8 @@ def main():
             mode_cleanup(opts)
         elif mode == "preview":
             mode_preview(opts)
+        elif mode == "resolve-theme":
+            mode_resolve_theme(sys.argv[1:])
         else:
             sys.stderr.write(f"unknown mode: {mode}\n")
             sys.exit(2)

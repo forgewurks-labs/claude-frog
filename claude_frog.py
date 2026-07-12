@@ -84,8 +84,14 @@ FALLBACK_UNHINGED_TURNS = 4
 FLORA_ENABLED = os.environ.get("CLAUDE_FROG_FLORA", "1").lower() not in (
     "0", "false", "off", "no", "")
 ENTRANCE_FRAMES = 10          # frames a prop takes to grow/drop/roll/drift in
-FLORA_MAX = 40                # cap on live props (oldest drop off; bounds memory)
+FLORA_MAX = 400               # runaway backstop only — props are a running tally
+                              # that accumulates all session, so this sits far
+                              # above any real prompt count (not a visible cap)
 GROUND_PITCH = 9              # column spacing between ground props (> widest prop)
+TIER_PITCH = 7                # rows between stacked ground rows (== tallest prop,
+                              # so even trees stack exactly touching, never over-
+                              # lapping; shorter props just leave a shelf gap)
+CLOUD_PITCH = 8               # column spacing between parked clouds in the sky
 
 CACHE_DIR = os.path.join(
     os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache")),
@@ -795,34 +801,37 @@ def _prop_sprite(prop):
 class Scene:
     """The frog's accumulating diorama, held in the dance daemon's memory.
 
-    `spawn` adds one prop per user prompt; ground props (flower/tree/rock/log)
-    alternate left/right of the frog and step outward so the scene grows
-    symmetrically, while clouds drift across the sky. `tick` advances the drift
-    and culls clouds that have sailed off. `blits` is pure: given the current
-    frame and the frog's resting footprint it returns (sprite, x, y) tuples to
-    paint, applying each prop's entrance animation. Nothing here does I/O or can
-    raise on bad input — the daemon still guards it, but it aims never to need it.
+    `spawn` adds one prop per user prompt and nothing ever removes them — the
+    scene is a running per-session tally of prompts. Ground props (flower/tree/
+    rock/log) alternate left/right of the frog and step outward; when a row runs
+    out of room they wrap up into a new tier stacked above, so a long session
+    fills the pane like a growing garden. Clouds drift in once and then park in
+    the sky, filling it left-to-right. `blits` is pure: given the current frame
+    and the frog's resting footprint it returns (sprite, x, y) tuples to paint,
+    applying each prop's entrance animation and its resting tier/parked slot.
+    Nothing here does I/O or can raise on bad input — the daemon still guards it,
+    but it aims never to need it.
     """
 
     def __init__(self, rng=None):
         self.props = []
         self.rng = rng or random
-        self._n = 0          # total spawned (drives side alternation)
         self._left = 0       # ground props placed on each side so far...
-        self._right = 0      # ...used as the outward step index
+        self._right = 0      # ...used as the monotonic outward step index
+        self._clouds = 0     # clouds parked so far (drives sky packing)
 
     def spawn(self, frame, cols):
         kind = self.rng.choice(PROP_KINDS)
         prop = {"kind": kind, "birth": frame, "hue": self.rng.random(),
                 "phase": self.rng.random() * math.tau}
         if kind == "cloud":
-            prop["dir"] = self.rng.choice((-1, 1))
-            prop["speed"] = 0.15 + self.rng.random() * 0.2   # px/frame
-            prop["y"] = self.rng.randint(0, 2)
-            # enter from just off the leading edge; x is tracked as a float
-            prop["x"] = -8.0 if prop["dir"] > 0 else float(cols + 2)
+            prop["cidx"] = self._clouds       # sky slot (packed in blits)
+            prop["dir"] = self.rng.choice((-1, 1))   # entrance drift direction
+            self._clouds += 1
         else:
-            side = -1 if self._n % 2 == 0 else 1
+            # Alternate sides by how many ground props exist so the garden grows
+            # symmetrically regardless of how clouds interleave.
+            side = -1 if (self._left + self._right) % 2 == 0 else 1
             prop["side"] = side
             if side < 0:
                 prop["slot"] = self._left
@@ -831,48 +840,42 @@ class Scene:
                 prop["slot"] = self._right
                 self._right += 1
         self.props.append(prop)
-        self._n += 1
+        # Props are meant to remain (a tally), so this only guards runaway memory
+        # on an implausibly long session — well above any real prompt count.
         if len(self.props) > FLORA_MAX:
             self.props.pop(0)
 
-    def tick(self, cols):
-        """Advance cloud drift and drop clouds that have left the sky."""
-        alive = []
-        for p in self.props:
-            if p["kind"] == "cloud":
-                p["x"] += p["speed"] * p["dir"]
-                w = len(CLOUD[0])
-                if -w - 4 < p["x"] < cols + 4:
-                    alive.append(p)
-                # else: sailed off — cull
-            else:
-                alive.append(p)
-        self.props = alive
-
     def blits(self, frame, cols, stage_h, frog_x, frog_w):
         """(sprite, x, y) paints for this frame, entrance animations applied."""
+        gap = 1
         out = []
         for p in self.props:
             spr = _prop_sprite(p)
             ph, pw = len(spr), len(spr[0])
-            prog = min(1.0, (frame - p["birth"]) / max(1, ENTRANCE_FRAMES))
+            prog = max(0.0, min(1.0, (frame - p["birth"]) / max(1, ENTRANCE_FRAMES)))
             if p["kind"] == "cloud":
-                out.append((spr, int(round(p["x"])), p["y"]))
+                out.append(self._cloud_blit(p, spr, prog, frame, cols))
                 continue
             # Ground props stand on the floor, stepping outward from the frog on
             # a fixed column pitch (wider than any prop) so neighbours of
-            # different widths never collide however they're interleaved.
-            gap = 1
+            # different widths never collide. Once a row fills the available
+            # half-width they wrap up into a new tier stacked above.
             if p["side"] < 0:
-                x = frog_x - gap - p["slot"] * GROUND_PITCH - pw
+                per_row = max(1, (frog_x - gap) // GROUND_PITCH)
             else:
-                x = frog_x + frog_w + gap + p["slot"] * GROUND_PITCH
-            y = stage_h - ph
+                per_row = max(1, (cols - frog_x - frog_w - gap) // GROUND_PITCH)
+            tier, col = divmod(p["slot"], per_row)
+            if p["side"] < 0:
+                x = frog_x - gap - col * GROUND_PITCH - pw
+            else:
+                x = frog_x + frog_w + gap + col * GROUND_PITCH
+            floor = stage_h - tier * TIER_PITCH     # row the prop's feet rest on
+            y = floor - ph
             if p["kind"] in ("flower", "tree"):
                 # grow: reveal from the bottom up, then a gentle breeze
                 rows = max(1, int(round(ph * prog)))
                 spr = spr[ph - rows:]
-                y = stage_h - rows
+                y = floor - rows
                 if prog >= 1.0 and p["kind"] == "flower":
                     x += int(round(math.sin(frame * 0.12 + p["phase"])))
             elif p["kind"] == "rock":
@@ -882,6 +885,19 @@ class Scene:
                 x += off if p["side"] > 0 else -off  # roll in from outside
             out.append((spr, x, y))
         return out
+
+    def _cloud_blit(self, p, spr, prog, frame, cols):
+        """A cloud drifts in from off-edge to its parked sky slot, then holds."""
+        cw = len(spr[0])
+        per_sky = max(1, cols // CLOUD_PITCH)
+        row, col = divmod(p["cidx"], per_sky)
+        parked_x = 1 + col * CLOUD_PITCH
+        parked_y = row % 3                       # keep clouds up in the sky band
+        entry_x = float(-cw - 2) if p["dir"] > 0 else float(cols + 2)
+        x = entry_x + (parked_x - entry_x) * prog
+        if prog >= 1.0:                          # parked: a gentle idle sway
+            x = parked_x + math.sin(frame * 0.05 + p["phase"])
+        return (spr, int(round(x)), parked_y)
 
 
 # --------------------------------------------------------------------------- #
@@ -1012,7 +1028,6 @@ def mode_dance(opts):
                     for _ in range(max(0, turns - last_turns)):
                         scene.spawn(frame, cols)
                     last_turns = turns
-                    scene.tick(cols)
                     for spr, px, py in scene.blits(frame, cols, stage_h,
                                                    rest_x, sw_):
                         blit(stage, spr, px, py)

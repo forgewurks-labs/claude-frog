@@ -91,13 +91,14 @@ SCENE_COLS = 70      # stage width in sprite cells (wide enough to flank the fro
 SCENE_ROWS = 7       # a default top/bottom pane is 7 char-rows tall
 
 
-def render_scene(out):
+def render_scene(out, theme=cf.DEFAULT_THEME):
     """The dance pane's accumulating diorama — frog flanked by his props.
 
     A curated, fully-grown scene (deterministic, so the asset regenerates
     identically) rendered through the real Scene.blits + blit path, so it shows
-    exactly what the pane draws: one of each prop kind around a fresh green frog,
-    plus a couple of drifting clouds.
+    exactly what the pane draws: one of each prop kind around a fresh frog, plus
+    a couple of drifting clouds. Only the frog wears `theme`; the props keep their
+    fixed natural palette (a rock is grey in any decade), exactly as in the pane.
     """
     import random
     stage_h = SCENE_ROWS * 2
@@ -122,7 +123,8 @@ def render_scene(out):
         cloud(SCENE_COLS - 10, 1),
     ]
 
-    frog = cf.pose(cf.FROG, cf._FROG_BLINK, {}, cf.RGB)   # fresh, upright, eyes open
+    frog = cf.pose(cf.FROG, cf._FROG_BLINK, {},          # fresh, upright, eyes open
+                   cf.palette_for(0, theme), cf.theme_spec(theme)["dither"])
     fw = len(frog[0])
     rest_x = (SCENE_COLS - fw) // 2
     stage = [[None] * SCENE_COLS for _ in range(stage_h)]
@@ -162,3 +164,4 @@ if __name__ == "__main__":
     for theme in cf.THEMES:
         render_theme(theme, os.path.join(here, f"frog-{theme}.png"))
     render_scene(os.path.join(here, "frog-scene.png"))
+    render_scene(os.path.join(here, "frog-scene-terraria.png"), theme="terraria")

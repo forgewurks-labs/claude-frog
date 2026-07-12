@@ -45,7 +45,7 @@ THEMES = {
   "snes":     {"base": RGB,      "pink": PINK,          "dither": ()},
   "genesis":  {"base": GENESIS,  "pink": GENESIS_PINK,  "dither": ("B", "L")},
   "gba":      {"base": GBA,      "pink": GBA_PINK,      "dither": ()},
-  "terraria": {"base": TERRARIA, "pink": TERRARIA_PINK, "dither": ("B", "D")},
+  "terraria": {"base": TERRARIA, "pink": TERRARIA_PINK, "dither": ("L", "B", "D")},
 }
 DEFAULT_THEME = "snes"
 ```
@@ -61,8 +61,9 @@ DEFAULT_THEME = "snes"
   Boy look.
 - **`terraria`** — the high-fidelity, warm & painterly indie look. A fuller
   earthy grass-green ramp with deep *desaturated* outlines (not pure black) and
-  creamy highlights; its `dither` keys (`B`/`D`, the midtone and its shadow) get
-  the cross-hatch, faking the hand-layered gradient shading of Terraria sprites.
+  creamy highlights; its `dither` keys (`L`/`B`/`D` — the whole lit midrange) get
+  a heavy cross-hatch, faking the hand-layered gradient shading of Terraria
+  sprites, while the brightest highlight and specular stay clean.
 
 Every theme keeps the green→pink **context gauge**: each carries a `base` (fresh)
 palette and a `pink` fade target, and `palette_for(tokens, theme)` blends between

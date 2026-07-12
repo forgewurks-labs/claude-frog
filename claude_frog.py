@@ -204,13 +204,14 @@ GBA_PINK = {
 # sandbox art. Where the SNES ramp is cool and smooth, this one is warmer and
 # richer — a fuller earthy grass-green ramp with deep DESATURATED outlines (not
 # pure black, the way Terraria rims its sprites) and creamy warm highlights. The
-# body midtone and its shadow get a subtle cross-hatch DITHER (see THEMES
-# "dither" + _colorize) to fake the painterly gradient shading Terraria layers
-# by hand. Fades from fresh jungle green to a warm Claude rose.
+# whole lit midrange (light, midtone, shadow) gets a heavy cross-hatch DITHER (see
+# THEMES "dither" + _colorize) to fake the painterly gradient shading Terraria
+# layers by hand — only the brightest highlight and the specular stay clean.
+# Fades from fresh jungle green to a warm Claude rose.
 TERRARIA = {
     "O": (0x20, 0x2c, 0x18),   # outline — deep desaturated forest (warm, not black)
     "H": (0xcf, 0xdc, 0x82),   # highlight — warm pale yellow-green catching light
-    "L": (0xa6, 0xc0, 0x58),   # light green (upper face)
+    "L": (0xa6, 0xc0, 0x58),   # light green (upper face) — dithered
     "B": (0x7a, 0x9c, 0x3e),   # body midtone — warm grass green (dithered)
     "D": (0x54, 0x74, 0x2e),   # shadow green (dithered)
     "S": (0x38, 0x52, 0x24),   # deep shadow
@@ -240,7 +241,7 @@ THEMES = {
     "snes":     {"base": RGB,      "pink": PINK,          "dither": ()},
     "genesis":  {"base": GENESIS,  "pink": GENESIS_PINK,  "dither": ("B", "L")},
     "gba":      {"base": GBA,      "pink": GBA_PINK,      "dither": ()},
-    "terraria": {"base": TERRARIA, "pink": TERRARIA_PINK, "dither": ("B", "D")},
+    "terraria": {"base": TERRARIA, "pink": TERRARIA_PINK, "dither": ("L", "B", "D")},
 }
 DEFAULT_THEME = "snes"
 

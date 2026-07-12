@@ -109,13 +109,16 @@ Flags: `--party` pins him to max goofiness + shake (always dancing);
 ### Rendering styles (pick per session)
 
 He renders in three console-era styles. All three keep the green→pink context
-gauge — each just expresses it in that console's idiom:
+gauge — each just expresses it in that console's idiom (the bar under each frog
+is that theme's actual fade, fresh → full window):
 
-| Theme | Look |
-|---|---|
-| `snes` *(default)* | smooth 16-bit shading ramp, fading to Claude pink |
-| `genesis` | punchy, oversaturated Mega Drive palette with cross-hatch **dithering**, fading to hot magenta |
-| `gba` | the iconic 4-tone monochrome Game Boy LCD (pea-green), whose tint slides green→rose as context fills |
+| | Theme | Look |
+|---|---|---|
+| <img src="assets/frog-snes.png" width="220" alt="SNES frog"> | `snes` *(default)* | smooth 16-bit shading ramp, fading to Claude pink |
+| <img src="assets/frog-genesis.png" width="220" alt="Genesis frog"> | `genesis` | punchy, oversaturated Mega Drive palette with cross-hatch **dithering**, fading to hot magenta |
+| <img src="assets/frog-gba.png" width="220" alt="Game Boy frog"> | `gba` | the iconic 4-tone monochrome Game Boy LCD (pea-green), whose tint slides green→rose as context fills |
+
+> Screenshots regenerate from the live palettes with `python3 assets/gen_screenshots.py`.
 
 Choose one **when you start a Claude session**. The simplest way — just name the
 console as the first word:

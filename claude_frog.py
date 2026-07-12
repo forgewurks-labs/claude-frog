@@ -72,14 +72,23 @@ CACHE_DIR = os.path.join(
 # --------------------------------------------------------------------------- #
 # Palette                                                                      #
 # --------------------------------------------------------------------------- #
-# Emoji-frog green with dark inset eyes. None == transparent (terminal bg).
+# "SNES" frog: instead of the flat two-green NES look, a top-lit shading ramp
+# (highlight -> light -> mid -> shadow -> deep-shadow) gives the head volume, a
+# specular glint lifts the eyes, and the grin gets a lit/shadowed cream so it
+# reads as a real cavity. None == transparent (terminal bg).
 
 RGB = {
-    "O": (0x2f, 0x4a, 0x1e),   # outline / deep leaf green
-    "B": (0x9d, 0xc8, 0x3b),   # body (the signature yellow-green)
-    "P": (0x2b, 0x2b, 0x2f),   # eyes / nostrils (near-black)
-    "N": (0xf5, 0xe9, 0xcf),   # open-mouth interior (warm cream)
-    "M": (0x2f, 0x4a, 0x1e),   # closed-eye / mouth line (== outline)
+    "O": (0x24, 0x3a, 0x17),   # outline (deep leaf green)
+    "H": (0xd0, 0xea, 0x74),   # highlight — top of the head catching light
+    "L": (0xb4, 0xd8, 0x54),   # light green (upper face)
+    "B": (0x9d, 0xc8, 0x3b),   # body midtone (the signature yellow-green)
+    "D": (0x74, 0x9e, 0x2f),   # shadow green (jaw, side rims)
+    "S": (0x57, 0x7e, 0x24),   # deep shadow (under the chin)
+    "P": (0x26, 0x26, 0x2b),   # eyes / nostrils (near-black)
+    "W": (0xf2, 0xf6, 0xe6),   # eye specular (the glint)
+    "N": (0xf7, 0xec, 0xd2),   # open-mouth interior, lit (warm cream)
+    "R": (0xd6, 0xbf, 0x97),   # open-mouth interior, shadowed (mouth depth)
+    "M": (0x24, 0x3a, 0x17),   # closed-eye / mouth line (== outline)
     " ": None,
     ".": None,
 }
@@ -88,41 +97,42 @@ RGB = {
 # Sprites (authored ragged; padded to a rectangle at load time)               #
 # --------------------------------------------------------------------------- #
 # Emoji-frog spirit: two eye bumps riding on a wide round head, dark inset eyes,
-# nostril dots, and a big open grin. No seams — he's a frog, not a plushie.
+# nostril dots, and a big open grin. No seams — he's a frog, not a plushie. The
+# shading ramp runs top (H) to bottom (S) so a single top light gives him depth.
 
 _FROG_SRC = [
     "  OOOO       OOOO  ",   # tops of the two eye bumps
-    " OBPPBO     OBPPBO ",   # dark inset eyes
-    " OBPPBOOOOOOOBPPBO ",   # bumps settle onto a wide head
-    "OBBBBBBBBBBBBBBBBBO",   # brow
-    "OBBBBPBBBBBBBPBBBBO",   # nostrils
-    "OBBBBBBBBBBBBBBBBBO",   # cheeks
-    "OBBOOOOOOOOOOOOOBBO",   # grin: top lip
-    "OBBONNNNNNNNNNNOBBO",   # open mouth
-    "OBBBOOOOOOOOOOOBBBO",   # grin: bottom lip curves up
-    " OBBBBBBBBBBBBBBBO ",   # jaw / body
-    "  OBBO       OBBO  ",   # legs
+    " OHWPLO     OHWPLO ",   # dark inset eyes with a specular glint (W)
+    " OHPPBOOOOOOOHPPBO ",   # bumps settle onto a wide head
+    "OHHHHHHHHHHHHHHHHHO",   # brow — brightest, catching the light
+    "OLLLLPLLLLLLLPLLLLO",   # upper face + nostrils
+    "OBBBBBBBBBBBBBBBBBO",   # cheeks — midtone
+    "ODBOOOOOOOOOOOOOBDO",   # grin: top lip, side rims fall into shadow
+    "ODBONNNNNNNNNNNOBDO",   # open mouth: lit cream
+    "ODBORRRRRRRRRRROBDO",   # open mouth: shadowed cream (depth)
+    " OSDDDDDDDDDDDDDSO ",   # jaw / body in shadow
+    "  ODBO       OBDO  ",   # legs
     "  OOO         OOO  ",   # feet
 ]
 
-# Blink overlay: the eyes squeeze shut to happy little arcs.
+# Blink overlay: the eyes squeeze shut to happy little arcs (lids in highlight).
 _FROG_BLINK = {
-    1: " OBBBBO     OBBBBO ",
-    2: " OB__BOOOOOOOB__BO ",
+    1: " OHHHHO     OHHHHO ",
+    2: " OH__BOOOOOOOH__BO ",
 }
 
 # Compact "mood frog" for the statusline (3 char-rows == 6px tall).
 _CHIBI_SRC = [
     " OOOO     OOOO ",   # eye bumps
-    " OPPO     OPPO ",   # eyes
-    "OBPPBOOOOOBPPBO",   # head bridge
-    "OBBOOOOOOOOOBBO",   # top lip
-    "OBBBONNNNNOBBBO",   # open mouth
-    " OBBBOOOOOBBBO ",   # bottom lip / jaw
+    " OWPO     OWPO ",   # eyes + glint
+    "OHPPBOOOOOHPPBO",   # head bridge (highlit)
+    "OLLLLLLLLLLLLLO",   # lit upper face
+    "ODBBONNNNNOBBDO",   # open mouth, shadowed rims
+    " OSDDOOOOODDSO ",   # bottom lip / jaw in shadow
 ]
 _CHIBI_BLINK = {
-    1: " OBBO     OBBO ",
-    2: "OB__BOOOOOB__BO",
+    1: " OHHO     OHHO ",
+    2: "OH__BOOOOOH__BO",
 }
 
 Pixel = tuple  # (r, g, b) or None
@@ -805,7 +815,9 @@ def mode_cleanup(opts):
     sys.exit(0)
 
 
-_SHADE = {"O": "#", "B": "@", "P": ".", "N": "%", "M": "-", " ": " ", ".": " "}
+_SHADE = {"O": "#", "H": "^", "L": "+", "B": "@", "D": "o", "S": "=",
+          "P": ".", "W": "*", "N": "%", "R": ":", "M": "-", "_": "-",
+          " ": " ", ".": " "}
 
 
 def mode_preview(opts):

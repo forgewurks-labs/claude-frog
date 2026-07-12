@@ -252,5 +252,75 @@ class TestCliModesExitZero(unittest.TestCase):
             self.assertEqual(r.returncode, 0, f"hook <- {p!r}: {r.stderr}")
 
 
+class TestInstallSettings(unittest.TestCase):
+    """`install-settings` must merge into settings.json without clobbering."""
+
+    def _run(self, path, extra=()):
+        return subprocess.run(
+            [sys.executable, SCRIPT, "install-settings", "--settings", path, *extra],
+            capture_output=True, text=True, timeout=15,
+        )
+
+    def _tmp(self, text=None):
+        import shutil
+        import tempfile
+        d = tempfile.mkdtemp()
+        self.addCleanup(lambda: shutil.rmtree(d, ignore_errors=True))
+        p = os.path.join(d, "settings.json")
+        if text is not None:
+            with open(p, "w") as f:
+                f.write(text)
+        return p
+
+    @staticmethod
+    def _read(p):
+        with open(p) as f:
+            return f.read()
+
+    def _load(self, p):
+        return json.loads(self._read(p))
+
+    def test_fresh_adds_statusline_and_all_hooks(self):
+        p = self._tmp()
+        r = self._run(p)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        data = self._load(p)
+        self.assertIn("claude_frog.py", data["statusLine"]["command"])
+        for ev in cf.FROG_HOOK_EVENTS:
+            self.assertTrue(cf._event_has_frog_hook(data["hooks"][ev]), ev)
+
+    def test_idempotent(self):
+        p = self._tmp()
+        self._run(p)
+        first = self._read(p)
+        r = self._run(p)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self._read(p), first, "second run should be a no-op")
+
+    def test_preserves_config_and_does_not_clobber_statusline(self):
+        p = self._tmp(json.dumps({
+            "model": "claude-opus-4-8",
+            "statusLine": {"type": "command", "command": "/usr/local/bin/my-bar"},
+            "hooks": {"UserPromptSubmit": [
+                {"hooks": [{"type": "command", "command": "/opt/my-hook"}]}]},
+        }))
+        r = self._run(p)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        data = self._load(p)
+        self.assertEqual(data["model"], "claude-opus-4-8")            # kept
+        self.assertEqual(data["statusLine"]["command"], "/usr/local/bin/my-bar")  # not clobbered
+        cmds = [h["command"] for g in data["hooks"]["UserPromptSubmit"]
+                for h in g["hooks"]]
+        self.assertIn("/opt/my-hook", cmds)                          # existing hook kept
+        self.assertTrue(any("claude_frog.py" in c for c in cmds))    # frog added
+        self.assertTrue(os.path.exists(p + ".bak"))                  # backed up
+
+    def test_refuses_invalid_json(self):
+        p = self._tmp("{ not json ")
+        r = self._run(p)
+        self.assertEqual(r.returncode, 1)
+        self.assertEqual(self._read(p), "{ not json ")               # untouched
+
+
 if __name__ == "__main__":
     unittest.main()

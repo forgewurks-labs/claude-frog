@@ -1063,6 +1063,127 @@ def mode_preview(opts):
     sys.exit(0)
 
 
+# Events the frog hooks into (see install/settings-hooks.json for the shape).
+FROG_HOOK_EVENTS = ("SessionStart", "UserPromptSubmit", "Stop", "SessionEnd")
+
+
+def _frog_cmd(kind):
+    """The command string baked into settings.json for `kind` (hook/statusline)."""
+    return f"python3 {os.path.abspath(__file__)} {kind}"
+
+
+def _is_frog_cmd(cmd):
+    return isinstance(cmd, str) and "claude_frog.py" in cmd
+
+
+def _event_has_frog_hook(groups):
+    """True if this event's hook list already runs the frog (any group)."""
+    if not isinstance(groups, list):
+        return False
+    for g in groups:
+        for h in (g or {}).get("hooks", []) if isinstance(g, dict) else []:
+            if _is_frog_cmd((h or {}).get("command")):
+                return True
+    return False
+
+
+def mode_install_settings(opts):
+    """Merge the frog's statusLine + hooks into ~/.claude/settings.json.
+
+    Deliberately conservative: preserves everything already in the file, backs
+    it up first, and is idempotent (re-running changes nothing). An existing
+    non-frog statusLine is left untouched — Claude Code allows only one, so we
+    won't clobber yours; the message points you at the compose wrapper instead.
+    Unlike the hook/statusline paths this is an explicit action, so it may fail
+    loudly rather than swallowing errors.
+    """
+    path = opts.get("settings") or os.path.join(
+        os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude"),
+        "settings.json",
+    )
+    sl_mode = opts.get("statusline_mode") or "statusline"
+    if sl_mode not in ("statusline", "tap", "none"):
+        sl_mode = "statusline"
+
+    # Load existing settings, refusing to clobber a file we can't parse.
+    data = {}
+    existed = os.path.exists(path)
+    if existed:
+        with open(path) as f:
+            text = f.read()
+        if text.strip():
+            try:
+                data = json.loads(text)
+            except ValueError as e:
+                sys.stderr.write(
+                    f"✗ {path} isn't valid JSON ({e}); leaving it untouched.\n"
+                    f"  Fix or move it, then re-run.\n")
+                sys.exit(1)
+        if not isinstance(data, dict):
+            sys.stderr.write(f"✗ {path} isn't a JSON object; leaving it alone.\n")
+            sys.exit(1)
+
+    changed, notes = [], []
+    hook_cmd = _frog_cmd("hook")
+
+    # statusLine (only one allowed) — add if absent, never overwrite yours.
+    if sl_mode != "none":
+        sl = data.get("statusLine")
+        if not sl:
+            data["statusLine"] = {"type": "command", "command": _frog_cmd(sl_mode)}
+            changed.append(f"statusLine → {sl_mode}")
+        elif _is_frog_cmd((sl or {}).get("command")):
+            notes.append("statusLine already runs the frog — left as-is")
+        else:
+            notes.append(
+                "you already have a statusLine — left as-is. To show the frog "
+                "too, wrap both via install/statusline-compose.sh")
+
+    # hooks — append a frog group per event, skipping any already present.
+    hooks = data.setdefault("hooks", {})
+    if not isinstance(hooks, dict):
+        sys.stderr.write("✗ settings 'hooks' isn't an object; leaving it alone.\n")
+        sys.exit(1)
+    for ev in FROG_HOOK_EVENTS:
+        groups = hooks.setdefault(ev, [])
+        if not isinstance(groups, list):
+            notes.append(f"hooks.{ev} isn't a list — skipped")
+            continue
+        if _event_has_frog_hook(groups):
+            continue
+        groups.append({"hooks": [{"type": "command", "command": hook_cmd}]})
+        changed.append(f"hook {ev}")
+
+    if not changed:
+        print(f"✅ {path} already wired for the frog — nothing to change.")
+        for n in notes:
+            print(f"   • {n}")
+        return
+
+    # Back up the original, then write atomically.
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    if existed:
+        try:
+            with open(path + ".bak", "w") as f:
+                f.write(text)
+        except OSError:
+            pass
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(data, f, indent=2)
+        f.write("\n")
+    os.replace(tmp, path)
+
+    print(f"✅ Wired the frog into {path}:")
+    for c in changed:
+        print(f"   + {c}")
+    for n in notes:
+        print(f"   • {n}")
+    if existed:
+        print(f"   (backed up your previous settings to {path}.bak)")
+    print("   Start a new Claude Code session to see him.")
+
+
 def mode_resolve_theme(argv):
     """Print the canonical theme for a spelling and exit 0; exit 1 if unknown.
 
@@ -1086,7 +1207,8 @@ def mode_resolve_theme(argv):
 def _parse(argv):
     mode = argv[0] if argv else "statusline"
     opts = {"session": None, "layout": None, "theme": None, "always": False,
-            "party": False, "which": "frog", "event": None}
+            "party": False, "which": "frog", "event": None,
+            "settings": None, "statusline_mode": "statusline"}
     i = 1
     while i < len(argv):
         a = argv[i]
@@ -1100,6 +1222,10 @@ def _parse(argv):
             i += 1; opts["event"] = argv[i]
         elif a == "--which":
             i += 1; opts["which"] = argv[i]
+        elif a == "--settings":
+            i += 1; opts["settings"] = argv[i]
+        elif a == "--statusline-mode":
+            i += 1; opts["statusline_mode"] = argv[i]
         elif a in ("--always", "--always-dance"):
             opts["always"] = True
         elif a == "--party":
@@ -1144,6 +1270,8 @@ def main():
             mode_preview(opts)
         elif mode == "resolve-theme":
             mode_resolve_theme(sys.argv[1:])
+        elif mode == "install-settings":
+            mode_install_settings(opts)
         else:
             sys.stderr.write(f"unknown mode: {mode}\n")
             sys.exit(2)

@@ -152,6 +152,10 @@ bind F run-shell "python3 /path/to/claude-frog/claude_frog.py toggle"
 
 #### 🌷 A little diorama that grows as you work
 
+<p align="center">
+  <img src="assets/frog-scene.png" width="640" alt="Claude Frog flanked by trees, a rock, flowers, a fallen log, and drifting clouds">
+</p>
+
 Every prompt you send, the dancing pane sprouts one random prop around the frog
 — a random-colored flower, a cloud, a rock, a tree, or a fallen log — that
 animates in (flowers and trees grow up, rocks drop and settle, logs roll in,

@@ -138,10 +138,33 @@ class TestThemes(unittest.TestCase):
             self.assertEqual(cf._parse(["dance"])[1]["theme"], "genesis")
             os.environ["CLAUDE_FROG_THEME"] = "nope"
             self.assertEqual(cf._parse(["dance"])[1]["theme"], cf.DEFAULT_THEME)
+            # friendly aliases resolve from both the flag and the env var
+            os.environ.pop("CLAUDE_FROG_THEME", None)
+            self.assertEqual(cf._parse(["dance", "--theme", "SEGA"])[1]["theme"],
+                             "genesis")
+            os.environ["CLAUDE_FROG_THEME"] = "Game Boy"
+            self.assertEqual(cf._parse(["dance"])[1]["theme"], "gba")
         finally:
             os.environ.pop("CLAUDE_FROG_THEME", None)
             if old is not None:
                 os.environ["CLAUDE_FROG_THEME"] = old
+
+    def test_resolve_theme_aliases(self):
+        cases = {
+            "snes": "snes", "SNES": "snes", "Nintendo": "snes", "super": "snes",
+            "genesis": "genesis", "SEGA": "genesis", "Mega Drive": "genesis",
+            "md": "genesis",
+            "gba": "gba", "GBA": "gba", "Game Boy": "gba", "gameboy": "gba",
+            "gb": "gba",
+        }
+        for spelling, canon in cases.items():
+            self.assertEqual(cf.resolve_theme(spelling), canon, spelling)
+        # canonical names are always themselves
+        for name in cf.THEMES:
+            self.assertEqual(cf.resolve_theme(name), name)
+        # junk / empty -> None (distinct from "use the default")
+        for junk in ("", None, "playstation", "xyz"):
+            self.assertIsNone(cf.resolve_theme(junk), junk)
 
 
 class TestGauges(unittest.TestCase):
@@ -182,6 +205,17 @@ class TestCliModesExitZero(unittest.TestCase):
         for theme in cf.THEMES:
             r = self._run(["statusline", "--theme", theme], stdin=p)
             self.assertEqual(r.returncode, 0, f"{theme}: {r.stderr}")
+
+    def test_resolve_theme_mode_prints_canon_and_exit_code(self):
+        # the shell launcher keys off both stdout and the exit code.
+        r = self._run(["resolve-theme", "SEGA"])
+        self.assertEqual(r.returncode, 0)
+        self.assertEqual(r.stdout, "genesis")
+        # unknown first word (a real prompt) -> nonzero, so the wrapper leaves it
+        for token in ("fix", "playstation", ""):
+            r = self._run(["resolve-theme", token])
+            self.assertEqual(r.returncode, 1, f"{token!r} should be unresolved")
+            self.assertEqual(r.stdout, "")
 
     def test_statusline_and_tap_survive_junk(self):
         payloads = ["", "not json", "{}",

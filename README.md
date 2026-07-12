@@ -117,16 +117,39 @@ gauge — each just expresses it in that console's idiom:
 | `genesis` | punchy, oversaturated Mega Drive palette with cross-hatch **dithering**, fading to hot magenta |
 | `gba` | the iconic 4-tone monochrome Game Boy LCD (pea-green), whose tint slides green→rose as context fills |
 
-Choose one **when you start a Claude session** by exporting an env var before
-launching Claude Code — each session picks up whatever's set:
+Choose one **when you start a Claude session**. The simplest way — just name the
+console as the first word:
+
+```sh
+claude SNES      # smooth 16-bit frog
+claude SEGA      # dithered Genesis frog
+claude GBA       # mono Game Boy frog
+```
+
+That comes from a tiny shell wrapper
+([`install/claude-theme.sh`](install/claude-theme.sh)) — source it once from
+your `~/.zshrc` / `~/.bashrc`:
+
+```sh
+source /path/to/claude-frog/install/claude-theme.sh
+```
+
+It only steps in when that first word actually names a theme (case- and
+spacing-insensitive — `SNES`, `nintendo`, `"Mega Drive"`, `gameboy` all work)
+and passes everything else straight through, so plain `claude`, `claude -r`, and
+`claude "fix the bug"` are untouched.
+
+Under the hood it just sets the `CLAUDE_FROG_THEME` env var for that launch — so
+if you'd rather not add a wrapper, set it yourself before starting Claude Code:
 
 ```sh
 export CLAUDE_FROG_THEME=genesis   # or: gba, snes
 ```
 
-Both the statusline frog and the dancing pane read it (the pane bakes the theme
-in at spawn, so it stays fixed for that session). You can also pass `--theme`
-directly to any invocation. Preview them without installing anything:
+Either way, both the statusline frog and the dancing pane read it (the pane
+bakes the theme in at spawn, so it stays fixed for that session). You can also
+pass `--theme` directly to any invocation. Preview them without installing
+anything:
 
 ```sh
 python3 claude_frog.py preview --theme genesis

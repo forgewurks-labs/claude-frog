@@ -14,6 +14,11 @@ about to soften" tell. Calm below ~40k, mostly unhinged by ~100k, full chaos by
 ~120k. He also changes color: green when fresh, fading toward Claude pink as
 context fills, fully pink by 200k tokens.
 
+He renders in three console-era styles — `snes` (default, smooth 16-bit
+shading), `genesis` (punchy, dithered Mega Drive), and `gba` (4-tone monochrome
+Game Boy LCD). Pick one per session with `--theme` or `CLAUDE_FROG_THEME`; each
+keeps the green->pink context gauge in its own idiom.
+
 Design discipline: the statusline and hook paths NEVER crash and always exit 0
 — a broken frog must never break your prompt. Imports stay light (stdlib only).
 
@@ -79,10 +84,16 @@ CACHE_DIR = os.path.join(
 # --------------------------------------------------------------------------- #
 # Palette                                                                      #
 # --------------------------------------------------------------------------- #
-# "SNES" frog: instead of the flat two-green NES look, a top-lit shading ramp
-# (highlight -> light -> mid -> shadow -> deep-shadow) gives the head volume, a
-# specular glint lifts the eyes, and the grin gets a lit/shadowed cream so it
-# reads as a real cavity. None == transparent (terminal bg).
+# The frog ships in three console-era rendering styles (see THEMES below). The
+# default "SNES" frog: instead of the flat two-green NES look, a top-lit shading
+# ramp (highlight -> light -> mid -> shadow -> deep-shadow) gives the head
+# volume, a specular glint lifts the eyes, and the grin gets a lit/shadowed
+# cream so it reads as a real cavity. None == transparent (terminal bg).
+#
+# Every palette maps the SAME set of sprite keys, so one sprite renders in any
+# theme — a theme is purely a recolor (plus, for Genesis, a dither). And every
+# theme keeps the green->pink context gauge: each has a base (fresh) palette and
+# a `pink` fade target, blended by palette_for() as the window fills.
 
 RGB = {
     "O": (0x24, 0x3a, 0x17),   # outline (deep leaf green)
@@ -114,6 +125,85 @@ PINK = {
     "S": (0xab, 0x57, 0x79),   # deep shadow (under the chin)
     "M": (0x52, 0x24, 0x38),   # closed-eye / mouth line (== outline)
 }
+
+# --- Sega Genesis / Mega Drive -------------------------------------------- #
+# 16-bit Sega look: a smaller, harder, oversaturated ramp (electric lime down to
+# a near-black outline) with a bright specular — the punchy "blast processing"
+# palette. Fewer perceived shades than the SNES, and the body midtones get
+# cross-hatch DITHERED (see THEMES "dither" + _colorize) to fake extra shading
+# the way the Genesis's limited palette did. Fades to a hot magenta-pink.
+GENESIS = {
+    "O": (0x0f, 0x1e, 0x10),   # outline — hard near-black green
+    "H": (0x9b, 0xf2, 0x3a),   # highlight — electric lime
+    "L": (0x6c, 0xd8, 0x2a),   # light green
+    "B": (0x3f, 0xb5, 0x2a),   # body midtone — saturated (dithered)
+    "D": (0x22, 0x82, 0x2c),   # shadow green
+    "S": (0x14, 0x55, 0x24),   # deep shadow
+    "P": (0x10, 0x12, 0x18),   # eyes / nostrils
+    "W": (0xea, 0xff, 0xf0),   # eye specular — bright
+    "N": (0xf6, 0xe7, 0x9c),   # open-mouth interior, lit
+    "R": (0xc8, 0x8a, 0x3a),   # open-mouth interior, shadowed
+    "M": (0x0f, 0x1e, 0x10),   # closed-eye / mouth line (== outline)
+    " ": None,
+    ".": None,
+}
+GENESIS_PINK = {
+    "O": (0x38, 0x0c, 0x22),   # outline — deep magenta
+    "H": (0xff, 0x9a, 0xd4),   # highlight — bright pink
+    "L": (0xf7, 0x5c, 0xb0),   # light pink
+    "B": (0xe8, 0x2a, 0x8c),   # body midtone — hot magenta-pink
+    "D": (0xb0, 0x1e, 0x6e),   # shadow pink
+    "S": (0x74, 0x14, 0x4a),   # deep shadow
+    "M": (0x38, 0x0c, 0x22),   # closed-eye / mouth line (== outline)
+}
+
+# --- Game Boy Advance ------------------------------------------------------ #
+# The iconic 4-tone monochrome Game Boy LCD (the classic pea-green DMG screen).
+# Many sprite keys collapse onto just four greens, flattening the shading into
+# the blocky Game Boy look. The gauge survives as a TINT shift: as context
+# fills, the whole LCD slides from green toward a dusky rose (like a red-tinted
+# screen), so every tone — eyes and mouth included — blushes together.
+_GBA_DARKEST, _GBA_DARK = (0x0f, 0x38, 0x0f), (0x30, 0x62, 0x30)
+_GBA_LIGHT, _GBA_LIGHTEST = (0x8b, 0xac, 0x0f), (0x9b, 0xbc, 0x0f)
+GBA = {
+    "O": _GBA_DARKEST,         # outline
+    "H": _GBA_LIGHTEST,        # highlight
+    "L": _GBA_LIGHT,           # light face
+    "B": _GBA_LIGHT,           # body midtone
+    "D": _GBA_DARK,            # shadow
+    "S": _GBA_DARKEST,         # deep shadow
+    "P": _GBA_DARKEST,         # eyes / nostrils
+    "W": _GBA_LIGHTEST,        # eye specular
+    "N": _GBA_LIGHT,           # open-mouth interior, lit
+    "R": _GBA_DARK,            # open-mouth interior, shadowed
+    "M": _GBA_DARKEST,         # closed-eye / mouth line
+    " ": None,
+    ".": None,
+}
+_GBR_DARKEST, _GBR_DARK = (0x2e, 0x0c, 0x18), (0x6b, 0x28, 0x3e)
+_GBR_LIGHT, _GBR_LIGHTEST = (0xc2, 0x63, 0x86), (0xe6, 0x9d, 0xba)
+GBA_PINK = {
+    "O": _GBR_DARKEST, "H": _GBR_LIGHTEST, "L": _GBR_LIGHT, "B": _GBR_LIGHT,
+    "D": _GBR_DARK, "S": _GBR_DARKEST, "P": _GBR_DARKEST, "W": _GBR_LIGHTEST,
+    "N": _GBR_LIGHT, "R": _GBR_DARK, "M": _GBR_DARKEST,
+}
+
+# Theme registry. Each theme is (base palette, pink fade target, dither keys).
+# `dither` is the set of palette keys that get cross-hatch shading (Genesis);
+# empty for the smooth-shaded SNES and the flat-LCD GBA. DEFAULT_THEME keeps the
+# original green SNES frog for anyone who never picks one.
+THEMES = {
+    "snes":    {"base": RGB,     "pink": PINK,         "dither": ()},
+    "genesis": {"base": GENESIS, "pink": GENESIS_PINK, "dither": ("B", "L")},
+    "gba":     {"base": GBA,     "pink": GBA_PINK,     "dither": ()},
+}
+DEFAULT_THEME = "snes"
+
+
+def theme_spec(theme):
+    """Resolve a theme name to its spec, falling back to the default."""
+    return THEMES.get(theme, THEMES[DEFAULT_THEME])
+
 
 # --------------------------------------------------------------------------- #
 # Sprites (authored ragged; padded to a rectangle at load time)               #
@@ -183,9 +273,27 @@ def _apply_blink(grid, overlay):
     return g
 
 
-def _colorize(grid, palette=RGB):
-    """Palette-key grid -> pixel grid of (r,g,b)|None."""
-    return [[palette.get(ch) for ch in row] for row in grid]
+def _colorize(grid, palette=RGB, dither=()):
+    """Palette-key grid -> pixel grid of (r,g,b)|None.
+
+    `dither` is a set of palette keys that get cross-hatch shading: on every
+    other pixel (checkerboard by x+y parity) the color is darkened, faking an
+    extra shade the way the Sega Genesis's limited palette did. Empty by default
+    so the smooth-shaded themes pay nothing.
+    """
+    if not dither:
+        return [[palette.get(ch) for ch in row] for row in grid]
+    dset = set(dither)
+    out = []
+    for y, row in enumerate(grid):
+        line = []
+        for x, ch in enumerate(row):
+            col = palette.get(ch)
+            if col is not None and ch in dset and (x + y) % 2:
+                col = (int(col[0] * 0.72), int(col[1] * 0.72), int(col[2] * 0.72))
+            line.append(col)
+        out.append(line)
+    return out
 
 
 # --------------------------------------------------------------------------- #
@@ -347,21 +455,23 @@ def _blend(base, target, t):
     return int(round(r * 255)), int(round(g * 255)), int(round(b * 255))
 
 
-def palette_for(tokens):
-    """The RGB palette blended toward PINK by the current token usage.
+def palette_for(tokens, theme=DEFAULT_THEME):
+    """The theme's base palette blended toward its pink target by token usage.
 
-    Returns the base green palette unchanged at zero tokens (or when tokens are
-    unknown) — identity, so nothing downstream pays for the common case — a
-    fully pink palette at/above PINK_FULL_TOKENS, and a vivid HLS blend (see
-    _blend) in between. Keys absent from PINK (eyes, mouth cream, transparent)
-    pass through untouched.
+    Returns the base (fresh) palette unchanged at zero tokens (or when tokens
+    are unknown) — identity, so nothing downstream pays for the common case — a
+    fully faded palette at/above PINK_FULL_TOKENS, and a vivid HLS blend (see
+    _blend) in between. Keys absent from the theme's pink target (e.g. the SNES
+    eyes / mouth cream, transparent) pass through untouched.
     """
+    spec = theme_spec(theme)
+    base_palette, target_palette = spec["base"], spec["pink"]
     t = pinkness(tokens)
     if t <= 0.0:
-        return RGB
+        return base_palette
     out = {}
-    for key, base in RGB.items():
-        target = PINK.get(key)
+    for key, base in base_palette.items():
+        target = target_palette.get(key)
         if base is None or target is None:
             out[key] = base
         else:
@@ -484,12 +594,13 @@ class Choreographer:
         return params
 
 
-def pose(base, blink_overlay, params, palette=RGB):
+def pose(base, blink_overlay, params, palette=RGB, dither=()):
     """Build a colorized pixel sprite for a frame from base grid + params.
 
     `palette` is the (possibly pink-shifted) color map to paint with; it
     defaults to the base green RGB so callers that don't care about the token
-    fade — previews, tests — get the plain frog.
+    fade — previews, tests — get the plain frog. `dither` is the theme's
+    cross-hatch key set (see _colorize), empty for smooth-shaded themes.
     """
     grid = base
     if params.get("blink"):
@@ -500,11 +611,11 @@ def pose(base, blink_overlay, params, palette=RGB):
         grid = flip_h(grid)
     if params.get("flip"):
         grid = flip_v(grid)
-    px = _colorize(grid, palette)
+    px = _colorize(grid, palette, dither)
     px = shear(px, params.get("shear", 0.0))
     drop = params.get("drop", 0)
     if drop:
-        px = squash(_colorize(grid, palette), drop)
+        px = squash(_colorize(grid, palette, dither), drop)
         px = shear(px, params.get("shear", 0.0))
     return px
 
@@ -567,6 +678,8 @@ def mode_dance(opts):
     session = opts["session"]
     always = opts["always"]
     party = opts["party"]
+    theme = opts.get("theme", DEFAULT_THEME)
+    dither = theme_spec(theme)["dither"]
     out = sys.stdout
     chor = Choreographer()
 
@@ -595,7 +708,7 @@ def mode_dance(opts):
             g = 1.0 if party else goofiness(tokens, turns)
             sk = shake_px(tokens) if not party else float(SHAKE_MAX_PX)
             # party maxes everything, so blush him fully pink too
-            palette = palette_for(PINK_FULL_TOKENS if party else tokens)
+            palette = palette_for(PINK_FULL_TOKENS if party else tokens, theme)
 
             # self-exit if this session's state has vanished (session ended and
             # cleanup ran, or files pruned) — no orphan frogs.
@@ -611,7 +724,7 @@ def mode_dance(opts):
             stage = [[None] * cols for _ in range(stage_h)]
 
             params = chor.step(active, g)
-            sprite = pose(FROG, _FROG_BLINK, params, palette)
+            sprite = pose(FROG, _FROG_BLINK, params, palette, dither)
             sh_, sw_ = len(sprite), len(sprite[0])
 
             base_x = (cols - sw_) // 2 + params.get("dx", 0)
@@ -703,8 +816,9 @@ def mode_tap():
     sys.exit(0)
 
 
-def mode_statusline():
+def mode_statusline(opts):
     session, tokens = _tap()
+    theme = opts.get("theme", DEFAULT_THEME)
 
     state, turns = _read_think(session)
     active = state == "thinking"
@@ -719,7 +833,8 @@ def mode_statusline():
         "blink": (frame % 20) == 0,
     }
 
-    sprite = pose(CHIBI, _CHIBI_BLINK, params, palette_for(tokens))
+    sprite = pose(CHIBI, _CHIBI_BLINK, params, palette_for(tokens, theme),
+                  theme_spec(theme)["dither"])
     rows = render_pixels(sprite)
 
     sk = shake_px(tokens)
@@ -749,7 +864,7 @@ def _in_tmux():
     return bool(os.environ.get("TMUX"))
 
 
-def _spawn_pane(session, layout=DEFAULT_LAYOUT):
+def _spawn_pane(session, layout=DEFAULT_LAYOUT, theme=DEFAULT_THEME):
     if not _in_tmux():
         return
     think_path, _, pane_path = _paths(session)
@@ -764,7 +879,9 @@ def _spawn_pane(session, layout=DEFAULT_LAYOUT):
         pass
     py = sys.executable or "python3"
     here = os.path.abspath(__file__)
-    cmd = f"exec {py} {here} dance --session {session}"
+    # theme is baked into the daemon's command so it stays fixed for the life of
+    # the pane, even if the env changes later in the session.
+    cmd = f"exec {py} {here} dance --session {session} --theme {theme}"
     # -b puts the new pane *before* the current one: above it for a vertical
     # split, left of it for a horizontal one.
     axis, size = LAYOUTS.get(layout, LAYOUTS[DEFAULT_LAYOUT])
@@ -837,7 +954,8 @@ def mode_hook(opts):
         _prune_stale()
         _, turns = _read_think(session)
         _write_json(think_path, {"state": "idle", "turns": 0, "ts": time.time()})
-        _spawn_pane(session, opts.get("layout", DEFAULT_LAYOUT))
+        _spawn_pane(session, opts.get("layout", DEFAULT_LAYOUT),
+                    opts.get("theme", DEFAULT_THEME))
     elif event == "UserPromptSubmit":
         _, turns = _read_think(session)
         _write_json(think_path, {"state": "thinking", "turns": turns + 1,
@@ -877,14 +995,16 @@ def mode_toggle(opts):
     if os.path.exists(pane_path):
         _kill_pane(session)
     else:
-        _spawn_pane(session, opts.get("layout", DEFAULT_LAYOUT))
+        _spawn_pane(session, opts.get("layout", DEFAULT_LAYOUT),
+                    opts.get("theme", DEFAULT_THEME))
     sys.exit(0)
 
 
 def mode_pane(opts):
     session = opts.get("session") or "default"
     _write_json(_paths(session)[0], {"state": "idle", "turns": 0, "ts": time.time()})
-    _spawn_pane(session, opts.get("layout", DEFAULT_LAYOUT))
+    _spawn_pane(session, opts.get("layout", DEFAULT_LAYOUT),
+                opts.get("theme", DEFAULT_THEME))
     sys.exit(0)
 
 
@@ -905,12 +1025,14 @@ _SHADE = {"O": "#", "H": "^", "L": "+", "B": "@", "D": "o", "S": "=",
 def mode_preview(opts):
     """Dev aid: print sprites as plain ASCII so you can eyeball the silhouette."""
     which = opts.get("which", "frog")
+    theme = opts.get("theme", DEFAULT_THEME)
+    spec = theme_spec(theme)
     src = FROG if which != "chibi" else CHIBI
     print(f"--- {which} silhouette ({len(src[0])}w x {len(src)}h px) ---")
     for row in src:
         print("".join(_SHADE.get(ch, "?") for ch in row))
-    print("\n--- half-block render (ANSI; may show as blocks) ---")
-    for line in render_pixels(_colorize(src)):
+    print(f"\n--- {theme} render (ANSI; may show as blocks) ---")
+    for line in render_pixels(_colorize(src, spec["base"], spec["dither"])):
         sys.stdout.write(line + _RESET + "\n")
     sys.exit(0)
 
@@ -922,7 +1044,7 @@ def mode_preview(opts):
 
 def _parse(argv):
     mode = argv[0] if argv else "statusline"
-    opts = {"session": None, "layout": None, "always": False,
+    opts = {"session": None, "layout": None, "theme": None, "always": False,
             "party": False, "which": "frog", "event": None}
     i = 1
     while i < len(argv):
@@ -931,6 +1053,8 @@ def _parse(argv):
             i += 1; opts["session"] = argv[i]
         elif a == "--layout":
             i += 1; opts["layout"] = argv[i]
+        elif a == "--theme":
+            i += 1; opts["theme"] = argv[i]
         elif a == "--event":
             i += 1; opts["event"] = argv[i]
         elif a == "--which":
@@ -948,6 +1072,12 @@ def _parse(argv):
         opts["layout"] = os.environ.get("CLAUDE_FROG_LAYOUT") or DEFAULT_LAYOUT
     if opts["layout"] not in LAYOUTS:
         opts["layout"] = DEFAULT_LAYOUT
+    if opts["theme"] is None:
+        # env lets the SessionStart hook, the statusline, and the tmux toggle
+        # keybind agree on a theme without threading --theme through each.
+        opts["theme"] = os.environ.get("CLAUDE_FROG_THEME") or DEFAULT_THEME
+    if opts["theme"] not in THEMES:
+        opts["theme"] = DEFAULT_THEME
     return mode, opts
 
 
@@ -959,7 +1089,7 @@ def main():
                 opts["session"] = "default"
             mode_dance(opts)
         elif mode == "statusline":
-            mode_statusline()
+            mode_statusline(opts)
         elif mode == "tap":
             mode_tap()
         elif mode == "hook":

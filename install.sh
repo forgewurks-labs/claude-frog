@@ -118,6 +118,10 @@ echo
 confirm "Proceed?" || { echo "No changes made."; exit 0; }
 echo
 
+# We track what ACTUALLY changed so the receipt reports the truth on a re-run.
+LAUNCHER_CHANGED=0
+SETTINGS_CHANGED=0
+
 # --- 1. the launcher -------------------------------------------------------- #
 if [ -f "$RC" ] && grep -qF "$MARKER" "$RC"; then
   echo "✅ Launcher already installed in $RC — nothing to do."
@@ -127,13 +131,17 @@ else
     printf 'source "%s"\n' "$WRAPPER"
   } >> "$RC"
   echo "✅ Added the Claude Frog launcher to $RC"
+  LAUNCHER_CHANGED=1
 fi
 
 # --- 2. the frog itself (statusline + hooks), unless --minimal -------------- #
 if [ "$MINIMAL" != 1 ]; then
   echo
   echo "🐸 Wiring up the frog (statusline + hooks)…"
-  python3 "$FROG" install-settings --statusline-mode "$SL_MODE"
+  # Capture so we can tell "wired something" from an idempotent no-op.
+  out="$(python3 "$FROG" install-settings --statusline-mode "$SL_MODE")"
+  printf '%s\n' "$out"
+  case "$out" in *"Wired the frog"*) SETTINGS_CHANGED=1 ;; esac
 fi
 
 # --- 3. prove it worked ----------------------------------------------------- #
@@ -145,11 +153,16 @@ python3 "$FROG" "${DOCTOR_ARGS[@]}" || true
 # --- 4. the receipt + the one unavoidable step ------------------------------ #
 echo
 echo "────────────────────────────────────────────────────────────"
-echo "What I changed:"
-echo "   • $RC — added the launcher (look for the '$MARKER' comment)"
-if [ "$MINIMAL" != 1 ]; then
-  echo "   • $SETTINGS — added the statusline frog + hooks"
-  echo "     (your previous file is saved at $SETTINGS.bak)"
+if [ "$LAUNCHER_CHANGED" = 1 ] || [ "$SETTINGS_CHANGED" = 1 ]; then
+  echo "What I changed:"
+  [ "$LAUNCHER_CHANGED" = 1 ] && \
+    echo "   • $RC — added the launcher (look for the '$MARKER' comment)"
+  if [ "$SETTINGS_CHANGED" = 1 ]; then
+    echo "   • $SETTINGS — added the statusline frog + hooks"
+    echo "     (your previous file is saved at $SETTINGS.bak)"
+  fi
+else
+  echo "What I changed:  nothing — you were already set up (idempotent re-run)."
 fi
 echo "Undo any time:   $ROOT/install.sh --uninstall"
 echo "────────────────────────────────────────────────────────────"

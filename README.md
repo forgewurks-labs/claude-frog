@@ -16,6 +16,58 @@ It's a self-inflicted CPU tax. That's the point. He's worth it.
 
 ---
 
+## Get started (one command)
+
+From nothing to a dancing frog:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/forgewurks-labs/claude-frog/main/bootstrap.sh | bash
+```
+
+That clones the repo to `~/.claude-frog`, then — after **showing you exactly what
+it will touch and asking once** — sets up the whole frog: the `claude <THEME>`
+launcher *and* the statusline frog + dance hooks, so you actually see him. It
+preserves everything already in your settings and backs the file up first.
+
+Prefer to read before you run? Same result, nothing piped to a shell:
+
+```sh
+git clone https://github.com/forgewurks-labs/claude-frog.git ~/.claude-frog
+~/.claude-frog/install.sh
+```
+
+**One unavoidable last step.** No installer can reach into the terminal it's
+running in to load a new shell command, so once it finishes:
+
+```sh
+# close this terminal and open a new one — or just run:
+source ~/.zshrc          # (or ~/.bashrc)
+```
+
+Then start a themed session:
+
+```sh
+claude SEGA              # or SNES, GBA — name none and he wears SNES
+```
+
+The installer ends by running a **checkup** (`claude_frog.py doctor`) that
+confirms each piece is wired, so you know it worked before you open that new
+terminal.
+
+**Options** (append after `bash -s --` when piping, or straight to `install.sh`):
+
+```sh
+./install.sh --minimal    # ONLY the `claude <THEME>` launcher, no settings edits
+./install.sh --tap        # full frog, but keep your own status bar (silent tap)
+./install.sh --yes        # skip the confirm prompt (for automation)
+./install.sh --uninstall  # remove everything it added, restore your backups
+```
+
+Not in tmux? You'll get the statusline frog (which is plenty). The *dancing
+pane* below needs tmux + WezTerm — add them any time for the full show.
+
+---
+
 ## Two ways to run him
 
 Both come from **one file, standard library only** — no `pip install`, no
@@ -132,11 +184,13 @@ claude GBA       # mono Game Boy frog
 ```
 
 That comes from a tiny shell wrapper
-([`install/claude-theme.sh`](install/claude-theme.sh)). Install it once — from
-the repo root:
+([`install/claude-theme.sh`](install/claude-theme.sh)). The
+[one-command install](#get-started-one-command) sets it up along with the frog
+himself; `./install.sh` from the repo root does the same locally. Want *only*
+the theme command and no settings edits? Use `--minimal`:
 
 ```sh
-./install.sh
+./install.sh --minimal
 ```
 
 That appends a `source` line to your `~/.zshrc` / `~/.bashrc` (it auto-detects
@@ -148,17 +202,11 @@ it by hand? Add this one line yourself:
 source /path/to/claude-frog/install/claude-theme.sh
 ```
 
-**Want the whole thing in one go?** `./install.sh` sets up only the theme
-*command*. Add `--with-frog` to also wire the statusline frog + hooks into
-`~/.claude/settings.json` so you actually *see* him:
-
-```sh
-./install.sh --with-frog          # launcher + statusline frog + hooks
-./install.sh --with-frog --tap    # ...but keep your own status bar (silent tap)
-```
-
-It preserves everything already in your settings, backs the file up first, won't
-overwrite an existing statusline, and is idempotent.
+The default `./install.sh` (no flags) does the whole thing — launcher **plus**
+the statusline frog + hooks in `~/.claude/settings.json` so you actually *see*
+him. It preserves everything already in your settings, backs the file up first,
+won't overwrite an existing statusline, is idempotent, and can be fully undone
+with `./install.sh --uninstall`.
 
 The wrapper only steps in when that first word actually names a theme (case- and
 spacing-insensitive — `SNES`, `nintendo`, `"Mega Drive"`, `gameboy` all work)

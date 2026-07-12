@@ -119,6 +119,8 @@ is that theme's actual fade, fresh → full window):
 | <img src="assets/frog-gba.png" width="220" alt="Game Boy frog"> | `gba` | the iconic 4-tone monochrome Game Boy LCD (pea-green), whose tint slides green→rose as context fills |
 
 > Screenshots regenerate from the live palettes with `python3 assets/gen_screenshots.py`.
+> How the themes and the launcher work under the hood — and how to add a theme —
+> is in [`docs/themes.md`](docs/themes.md).
 
 Choose one **when you start a Claude session**. The simplest way — just name the
 console as the first word:

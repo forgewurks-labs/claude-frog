@@ -1066,6 +1066,10 @@ def mode_preview(opts):
 # Events the frog hooks into (see install/settings-hooks.json for the shape).
 FROG_HOOK_EVENTS = ("SessionStart", "UserPromptSubmit", "Stop", "SessionEnd")
 
+# The comment install.sh writes above the launcher `source` line; doctor greps
+# for it to confirm the launcher is installed. Keep in sync with install.sh.
+MARKER = "claude-frog theme launcher"
+
 
 def _frog_cmd(kind):
     """The command string baked into settings.json for `kind` (hook/statusline)."""
@@ -1184,6 +1188,172 @@ def mode_install_settings(opts):
     print("   Start a new Claude Code session to see him.")
 
 
+def _settings_path(opts):
+    """Where ~/.claude/settings.json lives (honoring --settings / CLAUDE_CONFIG_DIR)."""
+    return opts.get("settings") or os.path.join(
+        os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude"),
+        "settings.json",
+    )
+
+
+def mode_uninstall_settings(opts):
+    """Remove ONLY the frog's statusLine + hooks from settings.json.
+
+    The mirror of install-settings: backs the file up, drops the frog's own
+    statusLine (never someone else's) and any frog hook groups, prunes emptied
+    event lists, and leaves everything else exactly as it was. Idempotent.
+    """
+    path = _settings_path(opts)
+    if not os.path.exists(path):
+        print(f"Nothing to remove — {path} doesn't exist.")
+        return
+    with open(path) as f:
+        text = f.read()
+    try:
+        data = json.loads(text) if text.strip() else {}
+    except ValueError:
+        sys.stderr.write(f"✗ {path} isn't valid JSON; leaving it untouched.\n")
+        sys.exit(1)
+    if not isinstance(data, dict):
+        sys.stderr.write(f"✗ {path} isn't a JSON object; leaving it alone.\n")
+        sys.exit(1)
+
+    removed = []
+    sl = data.get("statusLine")
+    if _is_frog_cmd((sl or {}).get("command")):
+        del data["statusLine"]
+        removed.append("statusLine")
+
+    hooks = data.get("hooks")
+    if isinstance(hooks, dict):
+        for ev in FROG_HOOK_EVENTS:
+            groups = hooks.get(ev)
+            if not isinstance(groups, list):
+                continue
+            kept = []
+            for g in groups:
+                cmds = (g or {}).get("hooks", []) if isinstance(g, dict) else []
+                if any(_is_frog_cmd((h or {}).get("command")) for h in cmds):
+                    continue  # drop this frog group
+                kept.append(g)
+            if len(kept) != len(groups):
+                removed.append(f"hook {ev}")
+                if kept:
+                    hooks[ev] = kept
+                else:
+                    del hooks[ev]
+        if not hooks:
+            del data["hooks"]
+
+    if not removed:
+        print(f"✅ No frog settings found in {path} — nothing to remove.")
+        return
+
+    with open(path + ".bak", "w") as f:
+        f.write(text)
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(data, f, indent=2)
+        f.write("\n")
+    os.replace(tmp, path)
+    print(f"✅ Removed the frog from {path}:")
+    for r in removed:
+        print(f"   - {r}")
+    print(f"   (backed up your previous settings to {path}.bak)")
+
+
+def mode_doctor(opts):
+    """A green/amber checkup so a first-timer KNOWS it worked.
+
+    Verifies the five things that make the frog appear — python3, the launcher
+    line, the statusline wiring, the dance hooks, a resolvable theme — plus a
+    non-critical note on tmux (needed only for the dancing pane). Exits non-zero
+    only if a *critical* piece is missing, so callers can gate on it; the tmux
+    note never fails the check.
+    """
+    C_OK = "\033[38;2;120;200;120m"
+    C_WARN = "\033[38;2;230;180;90m"
+    R = "\033[0m"
+    rows = []       # (label, ok, critical, detail)
+
+    rows.append(("Python 3", True, True, "%d.%d.%d" % sys.version_info[:3]))
+
+    # Launcher line in a shell rc (use --rc if the installer told us which one).
+    rc = opts.get("rc")
+    candidates = [rc] if rc else [
+        os.path.expanduser(p)
+        for p in ("~/.zshrc", "~/.bashrc", "~/.bash_profile", "~/.profile")]
+    found_rc = None
+    for p in candidates:
+        if p and os.path.exists(p):
+            try:
+                with open(p) as f:
+                    if MARKER in f.read():
+                        found_rc = p
+                        break
+            except OSError:
+                pass
+    rows.append(("Launcher (claude SEGA)", found_rc is not None, True,
+                 f"in {found_rc}" if found_rc
+                 else "not found in your shell rc — run install.sh"))
+
+    # settings.json: statusline + hooks. In --minimal mode the user deliberately
+    # skipped these, so they're informational, not failures.
+    minimal = bool(opts.get("minimal"))
+    path = _settings_path(opts)
+    sl_ok = hooks_ok = False
+    detail = "not wired — run install.sh"
+    data = None
+    if os.path.exists(path):
+        try:
+            with open(path) as f:
+                t = f.read()
+            data = json.loads(t) if t.strip() else {}
+        except ValueError:
+            detail = f"{path} isn't valid JSON"
+    if isinstance(data, dict):
+        sl_ok = _is_frog_cmd((data.get("statusLine") or {}).get("command"))
+        hk = data.get("hooks") or {}
+        hooks_ok = isinstance(hk, dict) and all(
+            _event_has_frog_hook(hk.get(ev)) for ev in FROG_HOOK_EVENTS)
+    if minimal and not sl_ok:
+        rows.append(("Statusline frog", True, False, "skipped (--minimal)"))
+        rows.append(("Dance hooks", True, False, "skipped (--minimal)"))
+    else:
+        rows.append(("Statusline frog", sl_ok, True,
+                     f"wired into {path}" if sl_ok else detail))
+        rows.append(("Dance hooks", hooks_ok, False,
+                     "all 4 events wired" if hooks_ok
+                     else "some hooks missing — re-run install.sh"))
+
+    raw = os.environ.get("CLAUDE_FROG_THEME")
+    theme = resolve_theme(raw) or DEFAULT_THEME
+    rows.append(("Theme", True, False,
+                 theme + ("" if raw else " (default)")))
+
+    in_tmux = bool(os.environ.get("TMUX"))
+    rows.append(("Dancing pane (tmux)", in_tmux, False,
+                 "in tmux — you get the full show" if in_tmux
+                 else "not in tmux — statusline frog only "
+                      "(add tmux + WezTerm for the pane)"))
+
+    crit_ok = all(ok for _, ok, critical, _ in rows if critical)
+
+    print("🐸 Claude Frog — checkup\n")
+    for label, ok, _critical, det in rows:
+        mark = (C_OK + "✅" + R) if ok else (C_WARN + "⚠️ " + R)
+        print("  %s %-24s %s" % (mark, label, det))
+    print()
+    if crit_ok:
+        print(C_OK + "All set." + R
+              + "  Open a NEW terminal (or `source` your rc), then:  claude SEGA")
+    else:
+        print(C_WARN + "Some things need attention" + R
+              + " — fix the ⚠️  above, then re-run:  python3 "
+              + f"{os.path.abspath(__file__)} doctor")
+    sys.exit(0 if crit_ok else 1)
+
+
 def mode_resolve_theme(argv):
     """Print the canonical theme for a spelling and exit 0; exit 1 if unknown.
 
@@ -1208,7 +1378,8 @@ def _parse(argv):
     mode = argv[0] if argv else "statusline"
     opts = {"session": None, "layout": None, "theme": None, "always": False,
             "party": False, "which": "frog", "event": None,
-            "settings": None, "statusline_mode": "statusline"}
+            "settings": None, "statusline_mode": "statusline", "rc": None,
+            "minimal": False}
     i = 1
     while i < len(argv):
         a = argv[i]
@@ -1226,6 +1397,10 @@ def _parse(argv):
             i += 1; opts["settings"] = argv[i]
         elif a == "--statusline-mode":
             i += 1; opts["statusline_mode"] = argv[i]
+        elif a == "--rc":
+            i += 1; opts["rc"] = argv[i]
+        elif a == "--minimal":
+            opts["minimal"] = True
         elif a in ("--always", "--always-dance"):
             opts["always"] = True
         elif a == "--party":
@@ -1272,6 +1447,10 @@ def main():
             mode_resolve_theme(sys.argv[1:])
         elif mode == "install-settings":
             mode_install_settings(opts)
+        elif mode == "uninstall-settings":
+            mode_uninstall_settings(opts)
+        elif mode == "doctor":
+            mode_doctor(opts)
         else:
             sys.stderr.write(f"unknown mode: {mode}\n")
             sys.exit(2)

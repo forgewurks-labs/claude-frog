@@ -322,5 +322,95 @@ class TestInstallSettings(unittest.TestCase):
         self.assertEqual(self._read(p), "{ not json ")               # untouched
 
 
+class TestUninstallSettings(unittest.TestCase):
+    """`uninstall-settings` must remove ONLY the frog, reversibly."""
+
+    def _tmp(self, text=None):
+        import shutil
+        import tempfile
+        d = tempfile.mkdtemp()
+        self.addCleanup(lambda: shutil.rmtree(d, ignore_errors=True))
+        p = os.path.join(d, "settings.json")
+        if text is not None:
+            with open(p, "w") as f:
+                f.write(text)
+        return p
+
+    def _run(self, mode, path, extra=()):
+        return subprocess.run(
+            [sys.executable, SCRIPT, mode, "--settings", path, *extra],
+            capture_output=True, text=True, timeout=15,
+        )
+
+    def test_install_then_uninstall_round_trips(self):
+        p = self._tmp(json.dumps({"model": "opus"}))
+        self.assertEqual(self._run("install-settings", p).returncode, 0)
+        self.assertEqual(self._run("uninstall-settings", p).returncode, 0)
+        with open(p) as f:
+            self.assertEqual(json.load(f), {"model": "opus"})
+
+    def test_leaves_foreign_statusline_and_hooks(self):
+        p = self._tmp(json.dumps({
+            "statusLine": {"type": "command", "command": "/usr/local/bin/my-bar"},
+            "hooks": {"Stop": [
+                {"hooks": [{"type": "command", "command": "/opt/my-hook"}]}]},
+        }))
+        r = self._run("uninstall-settings", p)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        with open(p) as f:
+            data = json.load(f)
+        self.assertEqual(data["statusLine"]["command"], "/usr/local/bin/my-bar")
+        self.assertEqual(data["hooks"]["Stop"][0]["hooks"][0]["command"],
+                         "/opt/my-hook")
+
+    def test_missing_file_is_noop(self):
+        p = self._tmp()  # not created
+        r = self._run("uninstall-settings", p)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+
+class TestDoctor(unittest.TestCase):
+    """`doctor` exits non-zero only when a *critical* piece is missing."""
+
+    def _tmp_dir(self):
+        import shutil
+        import tempfile
+        d = tempfile.mkdtemp()
+        self.addCleanup(lambda: shutil.rmtree(d, ignore_errors=True))
+        return d
+
+    def _run(self, settings, rc, extra=()):
+        return subprocess.run(
+            [sys.executable, SCRIPT, "doctor",
+             "--settings", settings, "--rc", rc, *extra],
+            capture_output=True, text=True, timeout=15,
+        )
+
+    def test_fails_when_nothing_wired(self):
+        d = self._tmp_dir()
+        rc = os.path.join(d, "rc"); open(rc, "w").close()
+        r = self._run(os.path.join(d, "settings.json"), rc)
+        self.assertEqual(r.returncode, 1)
+
+    def test_passes_when_fully_wired(self):
+        d = self._tmp_dir()
+        settings = os.path.join(d, "settings.json")
+        subprocess.run([sys.executable, SCRIPT, "install-settings",
+                        "--settings", settings], capture_output=True, timeout=15)
+        rc = os.path.join(d, "rc")
+        with open(rc, "w") as f:
+            f.write(f"# {cf.MARKER}\nsource whatever\n")
+        r = self._run(settings, rc)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_minimal_passes_with_only_launcher(self):
+        d = self._tmp_dir()
+        rc = os.path.join(d, "rc")
+        with open(rc, "w") as f:
+            f.write(f"# {cf.MARKER}\nsource whatever\n")
+        r = self._run(os.path.join(d, "settings.json"), rc, extra=("--minimal",))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()

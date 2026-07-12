@@ -949,7 +949,10 @@ def mode_dance(opts):
     scene = Scene() if FLORA_ENABLED else None
     # Don't backfill props for turns that already happened before this pane
     # started (e.g. a mid-session toggle) — only sprout on prompts from here on.
-    last_turns = _read_think(session)[1]
+    # The baseline comes from `--since` (captured in the spawning hook, before the
+    # pane booted) so a fast first prompt can't slip in before we read it here.
+    last_turns = opts["since"] if opts.get("since") is not None \
+        else _read_think(session)[1]
     frame = 0
 
     def cleanup(*_):
@@ -1166,7 +1169,12 @@ def _spawn_pane(session, layout=DEFAULT_LAYOUT, theme=DEFAULT_THEME):
     here = os.path.abspath(__file__)
     # theme is baked into the daemon's command so it stays fixed for the life of
     # the pane, even if the env changes later in the session.
-    cmd = f"exec {py} {here} dance --session {session} --theme {theme}"
+    # `--since` captures the turn count *now*, in the hook process, so the diorama
+    # baseline is fixed before the pane exists. Reading it inside the daemon after
+    # it boots would race a fast first UserPromptSubmit and eat the first prop.
+    since = _read_think(session)[1]
+    cmd = (f"exec {py} {here} dance --session {session} "
+           f"--theme {theme} --since {since}")
     # -b puts the new pane *before* the current one: above it for a vertical
     # split, left of it for a horizontal one.
     axis, size = LAYOUTS.get(layout, LAYOUTS[DEFAULT_LAYOUT])
@@ -1638,7 +1646,7 @@ def _parse(argv):
     opts = {"session": None, "layout": None, "theme": None, "always": False,
             "party": False, "which": "frog", "event": None,
             "settings": None, "statusline_mode": "statusline", "rc": None,
-            "minimal": False}
+            "minimal": False, "since": None}
     i = 1
     while i < len(argv):
         a = argv[i]
@@ -1658,6 +1666,12 @@ def _parse(argv):
             i += 1; opts["statusline_mode"] = argv[i]
         elif a == "--rc":
             i += 1; opts["rc"] = argv[i]
+        elif a == "--since":
+            i += 1
+            try:
+                opts["since"] = int(argv[i])
+            except (ValueError, IndexError):
+                opts["since"] = None
         elif a == "--minimal":
             opts["minimal"] = True
         elif a in ("--always", "--always-dance"):

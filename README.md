@@ -132,17 +132,28 @@ claude GBA       # mono Game Boy frog
 ```
 
 That comes from a tiny shell wrapper
-([`install/claude-theme.sh`](install/claude-theme.sh)) — source it once from
-your `~/.zshrc` / `~/.bashrc`:
+([`install/claude-theme.sh`](install/claude-theme.sh)). Install it once — from
+the repo root:
+
+```sh
+./install.sh
+```
+
+That appends a `source` line to your `~/.zshrc` / `~/.bashrc` (it auto-detects
+which), then open a new terminal. It's idempotent, edits nothing else, and the
+wrapper finds `claude_frog.py` on its own — no paths to hand-edit. Prefer to do
+it by hand? Add this one line yourself:
 
 ```sh
 source /path/to/claude-frog/install/claude-theme.sh
 ```
 
-It only steps in when that first word actually names a theme (case- and
+The wrapper only steps in when that first word actually names a theme (case- and
 spacing-insensitive — `SNES`, `nintendo`, `"Mega Drive"`, `gameboy` all work)
 and passes everything else straight through, so plain `claude`, `claude -r`, and
-`claude "fix the bug"` are untouched.
+`claude "fix the bug"` are untouched. **Name no theme and the frog stays on the
+default SNES** — as it does for an unset or unrecognized value, so he's never
+left themeless.
 
 Under the hood it just sets the `CLAUDE_FROG_THEME` env var for that launch — so
 if you'd rather not add a wrapper, set it yourself before starting Claude Code:

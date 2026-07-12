@@ -106,6 +106,34 @@ long-context quality actually softens, and reads the same whether your window is
 Flags: `--party` pins him to max goofiness + shake (always dancing);
 `--always-dance` dances regardless of turn state.
 
+### Rendering styles (pick per session)
+
+He renders in three console-era styles. All three keep the green→pink context
+gauge — each just expresses it in that console's idiom:
+
+| Theme | Look |
+|---|---|
+| `snes` *(default)* | smooth 16-bit shading ramp, fading to Claude pink |
+| `genesis` | punchy, oversaturated Mega Drive palette with cross-hatch **dithering**, fading to hot magenta |
+| `gba` | the iconic 4-tone monochrome Game Boy LCD (pea-green), whose tint slides green→rose as context fills |
+
+Choose one **when you start a Claude session** by exporting an env var before
+launching Claude Code — each session picks up whatever's set:
+
+```sh
+export CLAUDE_FROG_THEME=genesis   # or: gba, snes
+```
+
+Both the statusline frog and the dancing pane read it (the pane bakes the theme
+in at spawn, so it stays fixed for that session). You can also pass `--theme`
+directly to any invocation. Preview them without installing anything:
+
+```sh
+python3 claude_frog.py preview --theme genesis
+python3 claude_frog.py preview --theme gba
+python3 claude_frog.py dance --party --theme gba   # watch him lose it in mono
+```
+
 ### Where the pane goes
 
 `--layout top|bottom|left|right` (default `top`). `top`/`bottom` are 7-line

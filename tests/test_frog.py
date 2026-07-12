@@ -86,6 +86,64 @@ class TestRenderPipeline(unittest.TestCase):
             self.assertEqual(len(widths), 1)
 
 
+class TestThemes(unittest.TestCase):
+    def test_every_theme_resolves_all_sprite_keys(self):
+        # a theme missing a key would paint a transparent hole in the frog.
+        keys = {ch for grid in (cf.FROG, cf.CHIBI) for row in grid for ch in row}
+        for name, spec in cf.THEMES.items():
+            for k in keys:
+                if k in (" ", "."):
+                    continue
+                self.assertIsNotNone(
+                    spec["base"].get(k), f"{name} base missing key {k!r}")
+
+    def test_default_theme_is_registered(self):
+        self.assertIn(cf.DEFAULT_THEME, cf.THEMES)
+
+    def test_palette_for_fades_each_theme(self):
+        for name, spec in cf.THEMES.items():
+            # identity at zero tokens (the common, hot path)
+            self.assertIs(cf.palette_for(0, name), spec["base"])
+            self.assertIs(cf.palette_for(None, name), spec["base"])
+            # fully faded body at/above the pink-full mark
+            full = cf.palette_for(cf.PINK_FULL_TOKENS, name)
+            self.assertEqual(full["B"], spec["pink"]["B"])
+            # a genuine blend in between (not either endpoint)
+            mid = cf.palette_for(cf.PINK_FULL_TOKENS // 2, name)["B"]
+            self.assertNotIn(mid, (spec["base"]["B"], spec["pink"]["B"]))
+
+    def test_unknown_theme_falls_back_to_default(self):
+        self.assertIs(cf.theme_spec("bogus"), cf.THEMES[cf.DEFAULT_THEME])
+        self.assertIs(cf.palette_for(0, "bogus"),
+                      cf.THEMES[cf.DEFAULT_THEME]["base"])
+
+    def test_dither_darkens_alternating_pixels(self):
+        # Genesis cross-hatches its body midtone; a solid B block must come out
+        # two-toned, and a non-dithered theme must not.
+        block = [["B", "B"], ["B", "B"]]
+        gen = cf.theme_spec("genesis")
+        px = cf._colorize(block, gen["base"], gen["dither"])
+        self.assertEqual(len({c for row in px for c in row}), 2)
+        flat = cf._colorize(block, cf.THEMES["snes"]["base"],
+                            cf.THEMES["snes"]["dither"])
+        self.assertEqual(len({c for row in flat for c in row}), 1)
+
+    def test_theme_selection_flag_env_and_fallback(self):
+        import os
+        old = os.environ.pop("CLAUDE_FROG_THEME", None)
+        try:
+            self.assertEqual(cf._parse(["dance", "--theme", "gba"])[1]["theme"],
+                             "gba")
+            os.environ["CLAUDE_FROG_THEME"] = "genesis"
+            self.assertEqual(cf._parse(["dance"])[1]["theme"], "genesis")
+            os.environ["CLAUDE_FROG_THEME"] = "nope"
+            self.assertEqual(cf._parse(["dance"])[1]["theme"], cf.DEFAULT_THEME)
+        finally:
+            os.environ.pop("CLAUDE_FROG_THEME", None)
+            if old is not None:
+                os.environ["CLAUDE_FROG_THEME"] = old
+
+
 class TestGauges(unittest.TestCase):
     def test_goofiness_is_clamped(self):
         for tok in (0, cf.CALM_TOKENS, cf.UNHINGED_TOKENS, 10 ** 9, None):
@@ -111,6 +169,19 @@ class TestCliModesExitZero(unittest.TestCase):
         for which in ("frog", "chibi"):
             r = self._run(["preview", "--which", which])
             self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_preview_every_theme(self):
+        for theme in cf.THEMES:
+            r = self._run(["preview", "--theme", theme])
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIn(theme, r.stdout)
+
+    def test_statusline_survives_each_theme(self):
+        p = json.dumps({"session_id": "t",
+                        "context_window": {"used_percentage": 62}})
+        for theme in cf.THEMES:
+            r = self._run(["statusline", "--theme", theme], stdin=p)
+            self.assertEqual(r.returncode, 0, f"{theme}: {r.stderr}")
 
     def test_statusline_and_tap_survive_junk(self):
         payloads = ["", "not json", "{}",

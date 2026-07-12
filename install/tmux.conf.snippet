@@ -12,3 +12,9 @@ bind F run-shell "python3 /path/to/claude-frog/claude_frog.py toggle"
 # `top` is the default; uncomment and edit to move him. Set here (not via
 # --layout) so the keybind and the SessionStart hook agree on one answer.
 # set-environment -g CLAUDE_FROG_LAYOUT bottom
+
+# Which console he's rendered as: snes (default) | genesis | gba. Like the
+# layout, set it in the env so the keybind and the hook agree. Better still,
+# export CLAUDE_FROG_THEME in your shell before launching Claude so each session
+# can pick its own style.
+# set-environment -g CLAUDE_FROG_THEME genesis

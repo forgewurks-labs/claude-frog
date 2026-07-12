@@ -148,6 +148,18 @@ it by hand? Add this one line yourself:
 source /path/to/claude-frog/install/claude-theme.sh
 ```
 
+**Want the whole thing in one go?** `./install.sh` sets up only the theme
+*command*. Add `--with-frog` to also wire the statusline frog + hooks into
+`~/.claude/settings.json` so you actually *see* him:
+
+```sh
+./install.sh --with-frog          # launcher + statusline frog + hooks
+./install.sh --with-frog --tap    # ...but keep your own status bar (silent tap)
+```
+
+It preserves everything already in your settings, backs the file up first, won't
+overwrite an existing statusline, and is idempotent.
+
 The wrapper only steps in when that first word actually names a theme (case- and
 spacing-insensitive — `SNES`, `nintendo`, `"Mega Drive"`, `gameboy` all work)
 and passes everything else straight through, so plain `claude`, `claude -r`, and

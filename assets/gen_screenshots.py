@@ -87,7 +87,78 @@ def render_theme(theme, out):
     print(f"wrote {out}  ({W}x{H})")
 
 
+SCENE_COLS = 70      # stage width in sprite cells (wide enough to flank the frog)
+SCENE_ROWS = 7       # a default top/bottom pane is 7 char-rows tall
+
+
+def render_scene(out):
+    """The dance pane's accumulating diorama — frog flanked by his props.
+
+    A curated, fully-grown scene (deterministic, so the asset regenerates
+    identically) rendered through the real Scene.blits + blit path, so it shows
+    exactly what the pane draws: one of each prop kind around a fresh green frog,
+    plus a couple of drifting clouds.
+    """
+    import random
+    stage_h = SCENE_ROWS * 2
+    sc = cf.Scene(rng=random.Random(0))
+
+    def ground(kind, side, slot, hue=0.0):
+        return {"kind": kind, "birth": 0, "side": side, "slot": slot,
+                "hue": hue, "phase": 0.0}
+
+    def cloud(x, y):
+        return {"kind": "cloud", "birth": 0, "dir": 1, "speed": 0.0,
+                "y": y, "x": float(x), "hue": 0.0, "phase": 0.0}
+
+    sc.props = [
+        ground("tree", -1, 0),
+        ground("rock", -1, 1),
+        ground("flower", -1, 2, hue=0.92),   # magenta bloom
+        ground("log", 1, 0),
+        ground("flower", 1, 1, hue=0.13),     # gold bloom
+        ground("tree", 1, 2),
+        cloud(4, 0),
+        cloud(SCENE_COLS - 10, 1),
+    ]
+
+    frog = cf.pose(cf.FROG, cf._FROG_BLINK, {}, cf.RGB)   # fresh, upright, eyes open
+    fw = len(frog[0])
+    rest_x = (SCENE_COLS - fw) // 2
+    stage = [[None] * SCENE_COLS for _ in range(stage_h)]
+    frame = 50   # past every entrance animation, so the diorama is settled
+    for spr, sx, sy in sc.blits(frame, SCENE_COLS, stage_h, rest_x, fw):
+        cf.blit(stage, spr, sx, sy)
+    cf.blit(stage, frog, rest_x, stage_h - len(frog))
+
+    art_w, art_h = SCENE_COLS * SCALE, stage_h * SCALE
+    W, H = PAD * 2 + art_w, PAD * 2 + art_h
+    canvas = [[BG for _ in range(W)] for _ in range(H)]
+
+    def put(px, py, color):
+        if 0 <= px < W and 0 <= py < H:
+            canvas[py][px] = color
+
+    for cy in range(stage_h):
+        for cx in range(SCENE_COLS):
+            col = stage[cy][cx]
+            if col is None:
+                continue
+            for dy in range(SCALE):
+                for dx in range(SCALE):
+                    put(PAD + cx * SCALE + dx, PAD + cy * SCALE + dy, col)
+
+    for x in range(PAD - 1, PAD + art_w + 1):
+        put(x, PAD - 1, FRAME); put(x, PAD + art_h, FRAME)
+    for y in range(PAD - 1, PAD + art_h + 1):
+        put(PAD - 1, y, FRAME); put(PAD + art_w, y, FRAME)
+
+    _png(out, W, H, canvas)
+    print(f"wrote {out}  ({W}x{H})")
+
+
 if __name__ == "__main__":
     here = os.path.dirname(os.path.abspath(__file__))
     for theme in cf.THEMES:
         render_theme(theme, os.path.join(here, f"frog-{theme}.png"))
+    render_scene(os.path.join(here, "frog-scene.png"))

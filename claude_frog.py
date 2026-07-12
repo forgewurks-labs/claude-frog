@@ -76,6 +76,16 @@ DEFAULT_LAYOUT = "top"
 # statusline feeding tokens): ramp on turn count instead — unhinged by turn 4.
 FALLBACK_UNHINGED_TURNS = 4
 
+# Environment / flora: each user prompt sprouts one random prop (flower, cloud,
+# rock, tree, or fallen log) that animates in and settles around the frog. Props
+# live only in the dance daemon's memory, so they accumulate through a session
+# and reset when the pane respawns. Set CLAUDE_FROG_FLORA=0 to turn it off.
+FLORA_ENABLED = os.environ.get("CLAUDE_FROG_FLORA", "1").lower() not in (
+    "0", "false", "off", "no", "")
+ENTRANCE_FRAMES = 10          # frames a prop takes to grow/drop/roll/drift in
+FLORA_MAX = 40                # cap on live props (oldest drop off; bounds memory)
+GROUND_PITCH = 9              # column spacing between ground props (> widest prop)
+
 CACHE_DIR = os.path.join(
     os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache")),
     "claude-frog",
@@ -647,6 +657,197 @@ def pose(base, blink_overlay, params, palette=RGB, dither=()):
 
 
 # --------------------------------------------------------------------------- #
+# Environment — props that sprout around the frog, one per user prompt          #
+# --------------------------------------------------------------------------- #
+# A little diorama that fills in as you work: every prompt the dance pane sprouts
+# one random prop, animated in and then left standing. Pane-only eye candy (the
+# statusline has no room), held purely in the daemon's memory so the scene grows
+# through a session and resets when the pane respawns. Props are painted BEHIND
+# the frog so he always stands in the foreground.
+#
+# Props use a fixed natural palette regardless of the frog's console theme — a
+# rock is grey in any decade. Flower petals are the exception: each bloom is
+# recolored to a random hue. None == transparent (terminal bg / whatever's
+# behind it on the stage).
+FLORA = {
+    "x": (0x5a, 0x8f, 0x2e),   # stem / leaf green
+    "v": (0x3c, 0x63, 0x1f),   # leaf shadow
+    "g": (0x4f, 0x9d, 0x3a),   # tree foliage
+    "f": (0x33, 0x6e, 0x28),   # tree foliage shadow
+    "k": (0x7a, 0x53, 0x2f),   # bark / trunk / log wood
+    "j": (0x53, 0x37, 0x1e),   # bark shadow
+    "e": (0xcf, 0xb0, 0x86),   # cut-log end grain (cream)
+    "r": (0x9a, 0x9d, 0xa3),   # rock, lit
+    "q": (0x63, 0x66, 0x6d),   # rock, shadow
+    "c": (0xf2, 0xf5, 0xfb),   # cloud
+    "d": (0xcf, 0xd8, 0xe6),   # cloud, underside
+    "*": (0xff, 0x6d, 0x9a),   # flower petal   (overridden per bloom)
+    "o": (0xff, 0xe0, 0x7a),   # flower center  (overridden per bloom)
+    " ": None,
+    ".": None,
+}
+
+# Prop sprites (authored bottom-anchored: the last row is the one that meets the
+# floor, so growth animations reveal from the bottom up). Each char is one pixel.
+_FLOWER_SRC = [
+    ".*.",
+    "*o*",
+    ".*.",
+    ".x.",
+    ".x.",
+]
+_TREE_SRC = [
+    "  ggg  ",
+    " ggfgg ",
+    "gggfggg",
+    " ggfgg ",
+    "  gkg  ",
+    "   k   ",
+    "  kjk  ",
+]
+_ROCK_SRC = [
+    " rrr ",
+    "rrrrq",
+    "qqqqq",
+]
+_LOG_SRC = [
+    "ekkkkk",
+    "ejkkjk",
+    "ekkkkk",
+]
+_CLOUD_SRC = [
+    " cccc ",
+    "cccccc",
+    " dddd ",
+]
+
+FLOWER = _load(_FLOWER_SRC)
+TREE = _load(_TREE_SRC)
+ROCK = _load(_ROCK_SRC)
+LOG = _load(_LOG_SRC)
+CLOUD = _load(_CLOUD_SRC)
+
+# The theme-independent props colorize once; flowers vary per bloom (below).
+_PROP_PIX = {
+    "tree": _colorize(TREE, FLORA),
+    "rock": _colorize(ROCK, FLORA),
+    "log": _colorize(LOG, FLORA),
+    "cloud": _colorize(CLOUD, FLORA),
+}
+
+PROP_KINDS = ("flower", "tree", "rock", "log", "cloud")
+
+
+def _flower_palette(hue):
+    """A FLORA palette with the petal/center recolored to a random-hued bloom."""
+    pr, pg, pb = colorsys.hls_to_rgb(hue, 0.62, 0.85)          # vivid petal
+    cr, cg, cb = colorsys.hls_to_rgb((hue + 0.08) % 1.0, 0.74, 0.9)  # warm eye
+    pal = dict(FLORA)
+    pal["*"] = (int(pr * 255), int(pg * 255), int(pb * 255))
+    pal["o"] = (int(cr * 255), int(cg * 255), int(cb * 255))
+    return pal
+
+
+def _prop_sprite(prop):
+    """The (r,g,b)|None pixel grid for a prop (flowers colorize per bloom)."""
+    if prop["kind"] == "flower":
+        return _colorize(FLOWER, _flower_palette(prop["hue"]))
+    return _PROP_PIX[prop["kind"]]
+
+
+class Scene:
+    """The frog's accumulating diorama, held in the dance daemon's memory.
+
+    `spawn` adds one prop per user prompt; ground props (flower/tree/rock/log)
+    alternate left/right of the frog and step outward so the scene grows
+    symmetrically, while clouds drift across the sky. `tick` advances the drift
+    and culls clouds that have sailed off. `blits` is pure: given the current
+    frame and the frog's resting footprint it returns (sprite, x, y) tuples to
+    paint, applying each prop's entrance animation. Nothing here does I/O or can
+    raise on bad input — the daemon still guards it, but it aims never to need it.
+    """
+
+    def __init__(self, rng=None):
+        self.props = []
+        self.rng = rng or random
+        self._n = 0          # total spawned (drives side alternation)
+        self._left = 0       # ground props placed on each side so far...
+        self._right = 0      # ...used as the outward step index
+
+    def spawn(self, frame, cols):
+        kind = self.rng.choice(PROP_KINDS)
+        prop = {"kind": kind, "birth": frame, "hue": self.rng.random(),
+                "phase": self.rng.random() * math.tau}
+        if kind == "cloud":
+            prop["dir"] = self.rng.choice((-1, 1))
+            prop["speed"] = 0.15 + self.rng.random() * 0.2   # px/frame
+            prop["y"] = self.rng.randint(0, 2)
+            # enter from just off the leading edge; x is tracked as a float
+            prop["x"] = -8.0 if prop["dir"] > 0 else float(cols + 2)
+        else:
+            side = -1 if self._n % 2 == 0 else 1
+            prop["side"] = side
+            if side < 0:
+                prop["slot"] = self._left
+                self._left += 1
+            else:
+                prop["slot"] = self._right
+                self._right += 1
+        self.props.append(prop)
+        self._n += 1
+        if len(self.props) > FLORA_MAX:
+            self.props.pop(0)
+
+    def tick(self, cols):
+        """Advance cloud drift and drop clouds that have left the sky."""
+        alive = []
+        for p in self.props:
+            if p["kind"] == "cloud":
+                p["x"] += p["speed"] * p["dir"]
+                w = len(CLOUD[0])
+                if -w - 4 < p["x"] < cols + 4:
+                    alive.append(p)
+                # else: sailed off — cull
+            else:
+                alive.append(p)
+        self.props = alive
+
+    def blits(self, frame, cols, stage_h, frog_x, frog_w):
+        """(sprite, x, y) paints for this frame, entrance animations applied."""
+        out = []
+        for p in self.props:
+            spr = _prop_sprite(p)
+            ph, pw = len(spr), len(spr[0])
+            prog = min(1.0, (frame - p["birth"]) / max(1, ENTRANCE_FRAMES))
+            if p["kind"] == "cloud":
+                out.append((spr, int(round(p["x"])), p["y"]))
+                continue
+            # Ground props stand on the floor, stepping outward from the frog on
+            # a fixed column pitch (wider than any prop) so neighbours of
+            # different widths never collide however they're interleaved.
+            gap = 1
+            if p["side"] < 0:
+                x = frog_x - gap - p["slot"] * GROUND_PITCH - pw
+            else:
+                x = frog_x + frog_w + gap + p["slot"] * GROUND_PITCH
+            y = stage_h - ph
+            if p["kind"] in ("flower", "tree"):
+                # grow: reveal from the bottom up, then a gentle breeze
+                rows = max(1, int(round(ph * prog)))
+                spr = spr[ph - rows:]
+                y = stage_h - rows
+                if prog >= 1.0 and p["kind"] == "flower":
+                    x += int(round(math.sin(frame * 0.12 + p["phase"])))
+            elif p["kind"] == "rock":
+                y -= int(round((1.0 - prog) * 6))   # drop in and settle
+            elif p["kind"] == "log":
+                off = int(round((1.0 - prog) * (pw + 4)))
+                x += off if p["side"] > 0 else -off  # roll in from outside
+            out.append((spr, x, y))
+        return out
+
+
+# --------------------------------------------------------------------------- #
 # State files (per session)                                                    #
 # --------------------------------------------------------------------------- #
 
@@ -708,6 +909,11 @@ def mode_dance(opts):
     dither = theme_spec(theme)["dither"]
     out = sys.stdout
     chor = Choreographer()
+    scene = Scene() if FLORA_ENABLED else None
+    # Don't backfill props for turns that already happened before this pane
+    # started (e.g. a mid-session toggle) — only sprout on prompts from here on.
+    last_turns = _read_think(session)[1]
+    frame = 0
 
     def cleanup(*_):
         out.write("\x1b[?25h\x1b[0m\x1b[2J\x1b[H")
@@ -753,13 +959,28 @@ def mode_dance(opts):
             sprite = pose(FROG, _FROG_BLINK, params, palette, dither)
             sh_, sw_ = len(sprite), len(sprite[0])
 
-            base_x = (cols - sw_) // 2 + params.get("dx", 0)
+            rest_x = (cols - sw_) // 2         # frog's resting center (props plant here)
+            base_x = rest_x + params.get("dx", 0)
             base_y = stage_h - sh_ + params.get("dy", 0)
             if sk:
                 base_x += random.randint(-int(sk), int(sk))
                 base_y += random.randint(-int(sk), int(sk))
             base_x = max(-2, min(cols - sw_ + 2, base_x))
             base_y = max(-2, min(stage_h - 2, base_y))
+
+            # Environment: sprout a prop per new prompt, then paint the scene
+            # behind the frog. Guarded so a prop bug can never stop him dancing.
+            if scene is not None:
+                try:
+                    for _ in range(max(0, turns - last_turns)):
+                        scene.spawn(frame, cols)
+                    last_turns = turns
+                    scene.tick(cols)
+                    for spr, px, py in scene.blits(frame, cols, stage_h,
+                                                   rest_x, sw_):
+                        blit(stage, spr, px, py)
+                except Exception:
+                    pass
 
             blit(stage, sprite, base_x, base_y)
 
@@ -769,6 +990,7 @@ def mode_dance(opts):
             out.write("\x1b[H" + "\n".join(frame_rows))
             out.flush()
 
+            frame += 1
             fps = FPS_ACTIVE if active else FPS_IDLE
             time.sleep(1.0 / fps)
     except SystemExit:

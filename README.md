@@ -150,6 +150,21 @@ And the tmux toggle keybind (see
 bind F run-shell "python3 /path/to/claude-frog/claude_frog.py toggle"
 ```
 
+#### 🌷 A little diorama that grows as you work
+
+<p align="center">
+  <img src="assets/frog-scene.png" width="640" alt="Claude Frog flanked by trees, a rock, flowers, a fallen log, and drifting clouds">
+</p>
+
+Every prompt you send, the dancing pane sprouts one random prop around the frog
+— a random-colored flower, a cloud, a rock, a tree, or a fallen log — that
+animates in (flowers and trees grow up, rocks drop and settle, logs roll in,
+clouds drift across the sky) and then stays. It's a quiet, honest tally of how
+long you've been at it: a bare patch of grass at the start, a whole scene by the
+end of a long session. Props live only in the pane, so the diorama resets when a
+new session starts. It's on by default — set `CLAUDE_FROG_FLORA=0` to turn it
+off, or tune `ENTRANCE_FRAMES` / `FLORA_MAX` at the top of `claude_frog.py`.
+
 ### 🤫 Pane-only, but still honest (`tap`)
 
 Only the statusline is handed your token usage — the hooks are blind to it. So

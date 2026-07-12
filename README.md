@@ -155,6 +155,11 @@ bind F run-shell "python3 /path/to/claude-frog/claude_frog.py toggle"
 <p align="center">
   <img src="assets/frog-scene.png" width="640" alt="Claude Frog flanked by trees, a rock, flowers, a fallen log, and drifting clouds">
 </p>
+<p align="center">
+  <img src="assets/frog-scene-terraria.png" width="640" alt="The same diorama with the terraria-themed frog; the props keep their natural palette">
+  <br>
+  <sub>The same scene in the <code>terraria</code> style — the frog wears the theme, the props stay natural.</sub>
+</p>
 
 Every prompt you send, the dancing pane sprouts one random prop around the frog
 — a random-colored flower, a cloud, a rock, a tree, or a fallen log — that

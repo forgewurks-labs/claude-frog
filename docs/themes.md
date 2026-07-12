@@ -94,6 +94,11 @@ is named:
   spawned dance daemon so it stays fixed for that session's pane.
 - **`claude SNES` / `claude SEGA` / `claude GBA`** — the launcher, below.
 
+Whatever the route, an **unset or unrecognized theme falls back to
+`DEFAULT_THEME` (`snes`)** — `_parse` does `resolve_theme(raw) or DEFAULT_THEME`,
+and both `theme_spec()` and `palette_for()` fall back too, so the frog is never
+left themeless.
+
 ### The `claude <THEME>` launcher
 
 `claude` is Claude Code's own binary, not ours, so a literal `claude SNES` can't
@@ -111,7 +116,12 @@ shell wrapper** (bash + zsh) that defines a `claude()` function:
   there's no overhead on the common path.
 
 The wrapper must be sourced once (from `~/.zshrc` / `~/.bashrc`). Until then,
-only the `CLAUDE_FROG_THEME` / `--theme` routes select a theme.
+only the `CLAUDE_FROG_THEME` / `--theme` routes select a theme. `install.sh` (at
+the repo root) automates that: it auto-detects the rc file, appends the `source`
+line idempotently (guarded by a marker), and touches nothing else. The wrapper
+in turn locates `claude_frog.py` relative to its own path (via `BASH_SOURCE` /
+zsh `%x`), so there's nothing to hand-edit; export `CLAUDE_FROG` before sourcing
+to override.
 
 ## README screenshots
 

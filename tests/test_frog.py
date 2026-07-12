@@ -117,6 +117,25 @@ class TestThemes(unittest.TestCase):
         self.assertIs(cf.palette_for(0, "bogus"),
                       cf.THEMES[cf.DEFAULT_THEME]["base"])
 
+    def test_defaults_to_snes_when_no_theme_selected(self):
+        # The contingency: no flag, no/blank/junk env, or a junk --theme all
+        # land on SNES — the frog is never left themeless.
+        import os
+        self.assertEqual(cf.DEFAULT_THEME, "snes")
+        old = os.environ.pop("CLAUDE_FROG_THEME", None)
+        try:
+            self.assertEqual(cf._parse(["dance"])[1]["theme"], "snes")
+            self.assertEqual(cf._parse(["dance", "--theme", "xyz"])[1]["theme"],
+                             "snes")
+            for junk in ("", "playstation"):
+                os.environ["CLAUDE_FROG_THEME"] = junk
+                self.assertEqual(cf._parse(["dance"])[1]["theme"], "snes",
+                                 f"env={junk!r}")
+        finally:
+            os.environ.pop("CLAUDE_FROG_THEME", None)
+            if old is not None:
+                os.environ["CLAUDE_FROG_THEME"] = old
+
     def test_dither_darkens_alternating_pixels(self):
         # Genesis cross-hatches its body midtone; a solid B block must come out
         # two-toned, and a non-dithered theme must not.

@@ -412,5 +412,79 @@ class TestDoctor(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
 
+class TestEnvironment(unittest.TestCase):
+    """The flora scene: props that sprout around the frog, one per prompt."""
+
+    def test_prop_sprites_rectangular_and_keys_resolve(self):
+        for name in ("FLOWER", "TREE", "ROCK", "LOG", "CLOUD"):
+            grid = getattr(cf, name)
+            widths = {len(row) for row in grid}
+            self.assertEqual(len(widths), 1, f"{name} rows are ragged: {widths}")
+            used = {ch for row in grid for ch in row}
+            missing = used - set(cf.FLORA)
+            self.assertFalse(missing, f"{name} uses keys absent from FLORA: {missing}")
+
+    def test_spawn_adds_one_prop_of_a_known_kind(self):
+        import random
+        sc = cf.Scene(rng=random.Random(0))
+        for i in range(1, 6):
+            sc.spawn(i, 40)
+            self.assertEqual(len(sc.props), i)
+            self.assertIn(sc.props[-1]["kind"], cf.PROP_KINDS)
+
+    def test_flower_hues_vary_and_palette_recolors_petals(self):
+        # a flower's petal key is the random-hued bloom, never the FLORA default
+        p1 = cf._flower_palette(0.1)
+        p2 = cf._flower_palette(0.6)
+        self.assertNotEqual(p1["*"], cf.FLORA["*"])
+        self.assertNotEqual(p1["*"], p2["*"])
+
+    def test_blits_never_raise_and_return_int_coords(self):
+        import random
+        for cols, rows in ((40, 7), (24, 4), (120, 10), (9, 3)):
+            sc = cf.Scene(rng=random.Random(cols))
+            for t in range(30):
+                sc.spawn(t, cols)
+            stage_h = rows * 2
+            for f in range(40):          # spans entrance frames and settled ones
+                sc.tick(cols)
+                for spr, x, y in sc.blits(f, cols, stage_h, (cols - 19) // 2, 19):
+                    self.assertIsInstance(x, int)
+                    self.assertIsInstance(y, int)
+                    self.assertTrue(spr and spr[0])   # non-empty sprite
+
+    def test_prop_count_is_capped(self):
+        import random
+        sc = cf.Scene(rng=random.Random(1))
+        for t in range(cf.FLORA_MAX + 25):
+            sc.spawn(t, 40)
+        self.assertLessEqual(len(sc.props), cf.FLORA_MAX)
+
+    def test_clouds_drift_off_and_are_culled(self):
+        import random
+        rng = random.Random(2)
+        sc = cf.Scene(rng=rng)
+        # inject a cloud already near the right edge, drifting further right
+        sc.props.append({"kind": "cloud", "birth": 0, "dir": 1, "speed": 4.0,
+                         "y": 0, "x": 38.0, "hue": 0.0, "phase": 0.0})
+        for _ in range(20):
+            sc.tick(40)
+        self.assertFalse(any(p["kind"] == "cloud" for p in sc.props))
+
+    def test_ground_props_alternate_sides(self):
+        import random
+        sc = cf.Scene(rng=random.Random(3))
+        # force only ground props so side alternation is observable
+        sc.rng = type("R", (), {
+            "choice": staticmethod(lambda seq: "rock"),
+            "random": staticmethod(lambda: 0.0),
+            "randint": staticmethod(lambda a, b: a),
+        })()
+        for t in range(4):
+            sc.spawn(t, 40)
+        sides = [p["side"] for p in sc.props]
+        self.assertEqual(sides, [-1, 1, -1, 1])
+
+
 if __name__ == "__main__":
     unittest.main()

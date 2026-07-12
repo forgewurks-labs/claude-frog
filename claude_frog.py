@@ -11,7 +11,8 @@ One file, standard library only. Two jobs:
 He is also a gauge. The more context you've burned, the goofier he gets, and
 past ~150k tokens he starts to shake — an honest "you're deep in it, quality's
 about to soften" tell. Calm below ~40k, mostly unhinged by ~100k, full chaos by
-~120k.
+~120k. He also changes color: green when fresh, fading toward Claude pink as
+context fills, fully pink by 200k tokens.
 
 Design discipline: the statusline and hook paths NEVER crash and always exit 0
 — a broken frog must never break your prompt. Imports stay light (stdlib only).
@@ -21,6 +22,7 @@ See README.md for install. Everything below is tunable via the constants block.
 
 from __future__ import annotations
 
+import colorsys
 import json
 import math
 import os
@@ -43,6 +45,11 @@ UNHINGED_TOKENS = 120_000     # at/above this: full chaos (goofiness == 1.0)
 SHAKE_START_TOKENS = 150_000  # first jitter appears here
 SHAKE_FULL_TOKENS = 320_000   # jitter amplitude saturates here
 SHAKE_MAX_PX = 3              # max jitter in pixels (kept subtle/readable)
+
+# Color fade: fresh green at 0 tokens, fully Claude pink at/above this. Linear in
+# between (see pinkness / palette_for). Starts from the very first token so the
+# blush is a continuous, always-on readout of how full the window is.
+PINK_FULL_TOKENS = 200_000
 
 # Framerates.
 FPS_ACTIVE = 12.0             # dancing (a turn is running)
@@ -91,6 +98,21 @@ RGB = {
     "M": (0x24, 0x3a, 0x17),   # closed-eye / mouth line (== outline)
     " ": None,
     ".": None,
+}
+
+# Where the frog is headed: "Claude pink". As context fills, every green key in
+# the shading ramp fades toward its counterpart here (see palette_for), so the
+# whole frog blushes from fresh-leaf green to full Claude pink by 200k tokens.
+# The ramp order (highlight -> deep shadow) is preserved so he keeps his volume.
+# Keys with no entry here (eyes P/W, mouth cream N/R, transparent) never shift.
+PINK = {
+    "O": (0x52, 0x24, 0x38),   # outline — deep rose
+    "H": (0xfb, 0xdc, 0xe8),   # highlight — pale pink catching light
+    "L": (0xf7, 0xbd, 0xd2),   # light pink (upper face)
+    "B": (0xf0, 0x9c, 0xbc),   # body midtone — the signature Claude pink
+    "D": (0xd2, 0x77, 0x9c),   # shadow pink (jaw, side rims)
+    "S": (0xab, 0x57, 0x79),   # deep shadow (under the chin)
+    "M": (0x52, 0x24, 0x38),   # closed-eye / mouth line (== outline)
 }
 
 # --------------------------------------------------------------------------- #
@@ -161,9 +183,9 @@ def _apply_blink(grid, overlay):
     return g
 
 
-def _colorize(grid):
+def _colorize(grid, palette=RGB):
     """Palette-key grid -> pixel grid of (r,g,b)|None."""
-    return [[RGB.get(ch) for ch in row] for row in grid]
+    return [[palette.get(ch) for ch in row] for row in grid]
 
 
 # --------------------------------------------------------------------------- #
@@ -294,6 +316,59 @@ def shake_px(tokens):
     return _clamp(frac) * SHAKE_MAX_PX
 
 
+def pinkness(tokens):
+    """0..1 how far the frog has faded from green toward Claude pink.
+
+    Linear from the first token to PINK_FULL_TOKENS. Unknown token count (a
+    pane-only friend with no statusline feeding the gauge) stays green.
+    """
+    if tokens is None:
+        return 0.0
+    return _clamp(tokens / max(1, PINK_FULL_TOKENS))
+
+
+def _blend(base, target, t):
+    """Blend two RGB colors in HLS space so the fade stays vivid.
+
+    A straight RGB lerp between green and pink sags through a muddy tan at the
+    midpoint. Blending hue/lightness/saturation instead — and taking the SHORT
+    hue arc, which for green->pink runs the warm way (chartreuse -> orange ->
+    coral -> pink) — keeps saturation up the whole way across.
+    """
+    bh, bl, bs = colorsys.rgb_to_hls(*(c / 255.0 for c in base))
+    th, tl, ts = colorsys.rgb_to_hls(*(c / 255.0 for c in target))
+    dh = th - bh                      # shortest way around the hue wheel
+    if dh > 0.5:
+        dh -= 1.0
+    elif dh < -0.5:
+        dh += 1.0
+    h = (bh + dh * t) % 1.0
+    r, g, b = colorsys.hls_to_rgb(h, bl + (tl - bl) * t, bs + (ts - bs) * t)
+    return int(round(r * 255)), int(round(g * 255)), int(round(b * 255))
+
+
+def palette_for(tokens):
+    """The RGB palette blended toward PINK by the current token usage.
+
+    Returns the base green palette unchanged at zero tokens (or when tokens are
+    unknown) — identity, so nothing downstream pays for the common case — a
+    fully pink palette at/above PINK_FULL_TOKENS, and a vivid HLS blend (see
+    _blend) in between. Keys absent from PINK (eyes, mouth cream, transparent)
+    pass through untouched.
+    """
+    t = pinkness(tokens)
+    if t <= 0.0:
+        return RGB
+    out = {}
+    for key, base in RGB.items():
+        target = PINK.get(key)
+        if base is None or target is None:
+            out[key] = base
+        else:
+            out[key] = _blend(base, target, t)
+    return out
+
+
 # --------------------------------------------------------------------------- #
 # Choreographer — picks moves and emits per-frame pose params                  #
 # --------------------------------------------------------------------------- #
@@ -409,8 +484,13 @@ class Choreographer:
         return params
 
 
-def pose(base, blink_overlay, params):
-    """Build a colorized pixel sprite for a frame from base grid + params."""
+def pose(base, blink_overlay, params, palette=RGB):
+    """Build a colorized pixel sprite for a frame from base grid + params.
+
+    `palette` is the (possibly pink-shifted) color map to paint with; it
+    defaults to the base green RGB so callers that don't care about the token
+    fade — previews, tests — get the plain frog.
+    """
     grid = base
     if params.get("blink"):
         grid = _apply_blink(grid, blink_overlay)
@@ -420,11 +500,11 @@ def pose(base, blink_overlay, params):
         grid = flip_h(grid)
     if params.get("flip"):
         grid = flip_v(grid)
-    px = _colorize(grid)
+    px = _colorize(grid, palette)
     px = shear(px, params.get("shear", 0.0))
     drop = params.get("drop", 0)
     if drop:
-        px = squash([[RGB.get(ch) for ch in row] for row in grid], drop)
+        px = squash(_colorize(grid, palette), drop)
         px = shear(px, params.get("shear", 0.0))
     return px
 
@@ -514,6 +594,8 @@ def mode_dance(opts):
             active = party or always or (state == "thinking")
             g = 1.0 if party else goofiness(tokens, turns)
             sk = shake_px(tokens) if not party else float(SHAKE_MAX_PX)
+            # party maxes everything, so blush him fully pink too
+            palette = palette_for(PINK_FULL_TOKENS if party else tokens)
 
             # self-exit if this session's state has vanished (session ended and
             # cleanup ran, or files pruned) — no orphan frogs.
@@ -529,7 +611,7 @@ def mode_dance(opts):
             stage = [[None] * cols for _ in range(stage_h)]
 
             params = chor.step(active, g)
-            sprite = pose(FROG, _FROG_BLINK, params)
+            sprite = pose(FROG, _FROG_BLINK, params, palette)
             sh_, sw_ = len(sprite), len(sprite[0])
 
             base_x = (cols - sw_) // 2 + params.get("dx", 0)
@@ -637,7 +719,7 @@ def mode_statusline():
         "blink": (frame % 20) == 0,
     }
 
-    sprite = pose(CHIBI, _CHIBI_BLINK, params)
+    sprite = pose(CHIBI, _CHIBI_BLINK, params, palette_for(tokens))
     rows = render_pixels(sprite)
 
     sk = shake_px(tokens)

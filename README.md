@@ -18,6 +18,13 @@ It's a self-inflicted CPU tax. That's the point. He's worth it.
 
 ## Get started (one command)
 
+**You need:** `python3` (3.x, already on macOS/Linux) and a truecolor terminal
+(WezTerm, iTerm2, Kitty, or modern tmux). `git` too, for the one-liner. The
+*dancing pane* additionally wants **tmux + WezTerm** — but you don't need it to
+start; without it you still get the statusline frog.
+
+### 1. Install
+
 From nothing to a dancing frog:
 
 ```sh
@@ -27,7 +34,8 @@ curl -fsSL https://raw.githubusercontent.com/forgewurks-labs/claude-frog/main/bo
 That clones the repo to `~/.claude-frog`, then — after **showing you exactly what
 it will touch and asking once** — sets up the whole frog: the `claude <THEME>`
 launcher *and* the statusline frog + dance hooks, so you actually see him. It
-preserves everything already in your settings and backs the file up first.
+preserves everything already in your `~/.claude/settings.json` and backs the file
+up first (to `settings.json.bak`).
 
 Prefer to read before you run? Same result, nothing piped to a shell:
 
@@ -36,35 +44,61 @@ git clone https://github.com/forgewurks-labs/claude-frog.git ~/.claude-frog
 ~/.claude-frog/install.sh
 ```
 
-**One unavoidable last step.** No installer can reach into the terminal it's
-running in to load a new shell command, so once it finishes:
+Not in tmux? You'll get the statusline frog (which is plenty). The *dancing
+pane* needs tmux + WezTerm — add them any time for the full show.
+
+### 2. Activate (the one unavoidable step)
+
+No installer can reach into the terminal it's running in to load a new shell
+command, so once it finishes:
 
 ```sh
 # close this terminal and open a new one — or just run:
 source ~/.zshrc          # (or ~/.bashrc)
 ```
 
-Then start a themed session:
+### 3. Use it
+
+Start a session and name a console as the first word — that's his theme for the
+session:
 
 ```sh
 claude SEGA              # or SNES, GBA — name none and he wears SNES
 ```
 
-The installer ends by running a **checkup** (`claude_frog.py doctor`) that
-confirms each piece is wired, so you know it worked before you open that new
-terminal.
+Everything that isn't a theme name passes straight through, so `claude`,
+`claude -r`, and `claude "fix the bug"` behave exactly as before. That's the
+whole loop: **install → new terminal → `claude SEGA`.**
 
-**Options** (append after `bash -s --` when piping, or straight to `install.sh`):
+### Verify / troubleshoot
+
+The installer ends by running a **checkup** so you know it worked before you open
+that new terminal. Run it yourself any time:
 
 ```sh
-./install.sh --minimal    # ONLY the `claude <THEME>` launcher, no settings edits
-./install.sh --tap        # full frog, but keep your own status bar (silent tap)
-./install.sh --yes        # skip the confirm prompt (for automation)
-./install.sh --uninstall  # remove everything it added, restore your backups
+python3 ~/.claude-frog/claude_frog.py doctor
 ```
 
-Not in tmux? You'll get the statusline frog (which is plenty). The *dancing
-pane* below needs tmux + WezTerm — add them any time for the full show.
+It reports on `python3`, the launcher line, the statusline + hooks, your theme,
+and tmux. See a ⚠️? Re-run `~/.claude-frog/install.sh` — it's idempotent and safe
+to run again.
+
+### Options, updating, and removal
+
+Flags go **straight to `install.sh`**, or after `bash -s --` when piping
+(`curl … | bash -s -- --minimal`):
+
+```sh
+~/.claude-frog/install.sh --minimal    # ONLY the `claude <THEME>` launcher, no settings edits
+~/.claude-frog/install.sh --tap        # full frog, but keep your own status bar (silent tap)
+~/.claude-frog/install.sh --yes        # skip the confirm prompt (for automation)
+~/.claude-frog/install.sh --uninstall  # remove everything it added, restore your backups
+```
+
+**Update** to the latest by re-running the one-command install (it pulls, then
+re-wires idempotently), or `git -C ~/.claude-frog pull`. **Remove** it completely
+— launcher line *and* settings wiring, restoring your backups — with
+`~/.claude-frog/install.sh --uninstall`.
 
 ---
 

@@ -449,29 +449,54 @@ class TestEnvironment(unittest.TestCase):
                 sc.spawn(t, cols)
             stage_h = rows * 2
             for f in range(40):          # spans entrance frames and settled ones
-                sc.tick(cols)
                 for spr, x, y in sc.blits(f, cols, stage_h, (cols - 19) // 2, 19):
                     self.assertIsInstance(x, int)
                     self.assertIsInstance(y, int)
                     self.assertTrue(spr and spr[0])   # non-empty sprite
 
-    def test_prop_count_is_capped(self):
+    def test_props_accumulate_up_to_the_backstop(self):
+        # Props are a running tally: they remain until the runaway backstop.
         import random
         sc = cf.Scene(rng=random.Random(1))
-        for t in range(cf.FLORA_MAX + 25):
+        for t in range(cf.FLORA_MAX - 5):
             sc.spawn(t, 40)
-        self.assertLessEqual(len(sc.props), cf.FLORA_MAX)
+        self.assertEqual(len(sc.props), cf.FLORA_MAX - 5)   # nothing dropped yet
+        for t in range(20):
+            sc.spawn(t, 40)
+        self.assertEqual(len(sc.props), cf.FLORA_MAX)       # capped, not exceeded
 
-    def test_clouds_drift_off_and_are_culled(self):
+    def test_clouds_park_and_remain(self):
+        # Clouds drift in once, then stay put — never culled off-edge.
         import random
-        rng = random.Random(2)
-        sc = cf.Scene(rng=rng)
-        # inject a cloud already near the right edge, drifting further right
-        sc.props.append({"kind": "cloud", "birth": 0, "dir": 1, "speed": 4.0,
-                         "y": 0, "x": 38.0, "hue": 0.0, "phase": 0.0})
-        for _ in range(20):
-            sc.tick(40)
-        self.assertFalse(any(p["kind"] == "cloud" for p in sc.props))
+        sc = cf.Scene(rng=random.Random(2))
+        sc.rng = type("R", (), {
+            "choice": staticmethod(lambda seq: -1 if seq == (-1, 1) else "cloud"),
+            "random": staticmethod(lambda: 0.0),
+        })()
+        for t in range(3):
+            sc.spawn(t, 40)
+        # every cloud is still on stage every frame (never culled)...
+        for f in (0, 5, 50, 500):
+            self.assertEqual(len(sc.blits(f, 40, 14, 10, 19)), 3)
+        # ...and long after entrances they've parked on-screen, not sailed off
+        for _spr, x, _y in sc.blits(500, 40, 14, 10, 19):
+            self.assertTrue(0 <= x <= 40, f"parked cloud is off-screen at x={x}")
+        self.assertEqual(sum(p["kind"] == "cloud" for p in sc.props), 3)
+
+    def test_ground_props_wrap_into_stacked_tiers(self):
+        # Once a side's row fills the half-width, further props tier upward.
+        import random
+        sc = cf.Scene(rng=random.Random(4))
+        sc.rng = type("R", (), {
+            "choice": staticmethod(lambda seq: "rock"),
+            "random": staticmethod(lambda: 0.0),
+            "randint": staticmethod(lambda a, b: a),
+        })()
+        cols, frog_x, frog_w = 40, 10, 19
+        for t in range(30):
+            sc.spawn(t, cols)
+        ys = {y for _spr, _x, y in sc.blits(99, cols, 14, frog_x, frog_w)}
+        self.assertGreater(len(ys), 1, "props never tiered onto a second row")
 
     def test_ground_props_alternate_sides(self):
         import random

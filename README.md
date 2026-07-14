@@ -202,7 +202,7 @@ renders exactly as before, and the pane frog stays fully calibrated.
 | ≤ 40k | composed, professional little bobs |
 | 40k → 100k | progressively goofier — you can *watch* the context fill |
 | ~100k | mostly unhinged |
-| ≥ 120k | full chaos, frequent specials (backflips, big jumps) |
+| ≥ 120k | full chaos, frequent specials (backflips, big jumps, and — rarely — he turns around and shakes his rump at you) |
 | ≥ 150k | he starts to shake, and shakes harder the deeper you go (capped so he stays legible) |
 
 Anchored in **absolute tokens**, not percentage — so it's calibrated to when

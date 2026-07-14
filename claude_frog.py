@@ -475,6 +475,29 @@ def hip_shift(grid, amount):
     return out
 
 
+def turn_squeeze(grid, scale):
+    """Compress a grid horizontally toward its centerline (1.0 = full width).
+
+    Sampling the source at spread positions reads as the sprite rotating about
+    its vertical axis: drive `scale` from 1 down to ~0 and it goes edge-on, a
+    one-column sliver. Swap sprites at the sliver and widen back out and the eye
+    reads a turn, not a teleport. Only the twerk uses this (see `_m_twerk`).
+    """
+    if scale >= 0.999:
+        return grid
+    h = len(grid)
+    w = len(grid[0])
+    c = (w - 1) / 2.0
+    s = max(scale, 0.08)                 # keep a sliver so he never fully vanishes
+    out = [[None] * w for _ in range(h)]
+    for y in range(h):
+        for x in range(w):
+            sx = int(round(c + (x - c) / s))
+            if 0 <= sx < w:
+                out[y][x] = grid[y][sx]
+    return out
+
+
 def flip_h(grid):
     return [list(reversed(row)) for row in grid]
 
@@ -629,6 +652,7 @@ def palette_for(tokens, theme=DEFAULT_THEME):
 #   flip      : upside down (specials only)
 #   back      : turn his back to you (swaps in the back sprite)
 #   hips      : slide the rump sideways (only means anything with `back`)
+#   turn      : horizontal squeeze 0..1 (edge-on..full) for the twerk's pivot
 # t runs 0..1 across the move; g is goofiness 0..1.
 
 
@@ -691,25 +715,48 @@ def _m_spinout(t, g):
             "dx": int(round(6 * g * math.sin(t * math.pi * 2)))}
 
 
+# Twerk timing: a lenticular pivot in, the shake, then a pivot back out. The
+# frame counts live here so the SPECIALS entry and the move body can't drift
+# apart — they must agree, or the phase boundaries land on the wrong frames.
+TWERK_TURN = 7                              # frames per pivot, each way (odd -> a
+                                            # clean edge-on middle frame)
+TWERK_SHAKE = 24                            # frames of actual shaking
+TWERK_FRAMES = TWERK_TURN * 2 + TWERK_SHAKE
+
+
 def _m_twerk(t, g):
-    """He turns around and shakes it at you. Shameless in direct proportion to g.
+    """He pivots around, shakes it at you, and pivots back. Shameless in g.
 
-    The shake ramps in over the first quarter of the move (so the turn reads as a
-    turn, not a teleport) and the hips lead the bounce: the rump pops sideways on
-    `hips` while the whole frog drops a beat behind it on `dy`.
+    Three phases across the move: he squeezes edge-on and swaps front->back at
+    the sliver (`turn`), shakes with the hips leading and the body a beat behind
+    on `dy`, then pivots back out the same way. The sprite swap is hidden inside
+    the edge-on frame, so the turn reads as a turn, not a teleport.
 
-    `beats` must stay well under half the move's frame count (see SPECIALS): at
-    exactly half, every frame samples the shake at a zero crossing and he just
-    stands there with his back to you. Goofiness buys amplitude, not speed.
+    `beats` must stay well under half of TWERK_SHAKE: at exactly half, every shake
+    frame samples a zero crossing and he just stands there with his back turned.
+    Goofiness buys amplitude, not speed.
     """
-    beats = 3 + 2 * g                       # pops per move — Nyquist says <12
+    tin = TWERK_TURN / TWERK_FRAMES         # pivot-away ends here
+    tout = (TWERK_TURN + TWERK_SHAKE) / TWERK_FRAMES   # pivot-back starts here
+    # span the pivot's frames across u in [0, 1] so the *middle* frame lands at
+    # u = 0.5 — edge-on, where the sprite swap hides. (t/tin alone tops out at
+    # (TWERK_TURN-1)/TWERK_TURN and skips right over the sliver.)
+    piv = TWERK_TURN / (TWERK_TURN - 1.0)
+    if t < tin:                             # pivot away: front squeezes, swaps, widens
+        u = (t / tin) * piv
+        return {"back": u >= 0.5, "turn": abs(math.cos(u * math.pi)), "hips": 0.0}
+    if t >= tout:                           # pivot back: back squeezes, swaps, widens
+        u = ((t - tout) / (1.0 - tout)) * piv
+        return {"back": u < 0.5, "turn": abs(math.cos(u * math.pi)), "hips": 0.0}
+    s = (t - tin) / (tout - tin)            # 0..1 across the shake, fully turned
+    beats = 3 + 2 * g                       # pops per shake — Nyquist says <12
     amp = 1 + 2 * g                         # how far the cheeks travel
-    swing = math.sin(t * math.pi * 2 * beats)
-    ramp = math.sin(min(1.0, t * 4) * math.pi / 2)
-    return {"back": True,
+    swing = math.sin(s * math.pi * 2 * beats)
+    ramp = max(0.0, min(1.0, s / 0.2, (1.0 - s) / 0.2))   # ease in/out at the seams
+    return {"back": True, "turn": 1.0,
             "hips": amp * ramp * swing,
             "dy": -abs(int(round((0.6 + 1.4 * g) * ramp * swing))),
-            "shear": 0.5 * g * swing}
+            "shear": 0.5 * g * ramp * swing}
 
 
 IDLE_MOVES = [(_m_idle_breathe, 24), (_m_idle_sit, 16), (_m_idle_breathe, 30)]
@@ -717,7 +764,8 @@ ACTIVE_MOVES = [
     (_m_bob, 12), (_m_sway, 16), (_m_hop, 14), (_m_wiggle, 12), (_m_nod, 10),
     (_m_boop(1), 18), (_m_boop(-1), 18),
 ]
-SPECIALS = [(_m_bigjump, 16), (_m_backflip, 18), (_m_spinout, 20), (_m_twerk, 24)]
+SPECIALS = [(_m_bigjump, 16), (_m_backflip, 18), (_m_spinout, 20),
+            (_m_twerk, TWERK_FRAMES)]
 
 
 class Choreographer:
@@ -785,6 +833,7 @@ def pose(base, blink_overlay, params, palette=RGB, dither=(), back=None):
     if turned:
         px = hip_shift(px, params.get("hips", 0.0))
     px = shear(px, params.get("shear", 0.0))
+    px = turn_squeeze(px, params.get("turn", 1.0))
     return px
 
 

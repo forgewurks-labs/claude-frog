@@ -94,7 +94,8 @@ class TestRenderPipeline(unittest.TestCase):
     def test_transforms_preserve_rectangularity(self):
         px = cf._colorize(cf.FROG)
         for grid in (cf.shear(px, 3.0), cf.flip_h(px), cf.flip_v(px),
-                     cf.squash(px, 2), cf.hip_shift(cf._colorize(cf.FROG_BACK), 2)):
+                     cf.squash(px, 2), cf.hip_shift(cf._colorize(cf.FROG_BACK), 2),
+                     cf.turn_squeeze(px, 0.3)):
             widths = {len(r) for r in grid}
             self.assertEqual(len(widths), 1)
 
@@ -129,18 +130,32 @@ class TestTwerk(unittest.TestCase):
     def frames(self, g):
         return [cf._m_twerk(i / float(self.N), g) for i in range(self.N)]
 
-    def test_twerk_turns_around_and_shakes(self):
-        # the shake ramps in, so sample the whole move, not just the first frames.
+    def test_twerk_pivots_around_and_shakes(self):
         for g in (0.0, 0.5, 1.0):
             frames = self.frames(g)
-            self.assertTrue(all(f["back"] for f in frames))
-            # at Nyquist (beats == N/2) every frame lands on a zero crossing and
-            # he'd just stand there with his back turned. Guard the whole range.
+            # he pivots now, so he faces front during the turns and away for the
+            # shake — not back-facing the whole move.
+            self.assertTrue(any(f["back"] for f in frames)
+                            and any(not f["back"] for f in frames),
+                            f"he never actually turns around at g={g}")
+            # every shake frame (the ones with a real shake) must be back-facing.
+            shaking = [f for f in frames if abs(f["hips"]) > 1e-9]
+            self.assertTrue(shaking and all(f["back"] for f in shaking),
+                            f"he shakes while facing you at g={g}")
+            # at Nyquist (beats == TWERK_SHAKE/2) every frame lands on a zero
+            # crossing and he'd just stand there. Guard the whole range.
             self.assertTrue(any(abs(f["hips"]) >= 1.0 for f in frames),
                             f"the cheeks never actually move at g={g}")
             self.assertTrue(any(f["hips"] > 0 for f in frames)
                             and any(f["hips"] < 0 for f in frames),
                             f"he shakes only one way at g={g}")
+
+    def test_twerk_pivot_goes_edge_on(self):
+        # the illusion needs a near-edge-on frame in each pivot, where the sprite
+        # swap hides. `turn` is the horizontal squeeze; ~0 is edge-on.
+        turns = [f.get("turn", 1.0) for f in self.frames(0.5)]
+        self.assertTrue(any(t < 0.2 for t in turns),
+                        "the pivot never squeezes edge-on")
 
     def test_twerk_gets_bolder_with_goofiness(self):
         peak = lambda g: max(abs(f["hips"]) for f in self.frames(g))

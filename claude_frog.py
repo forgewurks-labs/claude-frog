@@ -312,6 +312,30 @@ _FROG_BLINK = {
     2: " OH__BOOOOOOOH__BO ",
 }
 
+# The frog from behind — the one pose that can't be squeezed out of the front
+# sprite by shear/mirror/flip, because it needs geometry the front view doesn't
+# have: no face, and a rump. Same width and height as FROG so he swaps in
+# cleanly mid-move (see the `back` param in pose). The eye bumps still ride above
+# the crown — you're seeing their backs — and the shading ramp runs the same way,
+# top-lit, except the cheeks get their own round highlight below the waist.
+_FROG_BACK_SRC = [
+    "  OOOO       OOOO  ",   # backs of the two eye bumps
+    " OHHHHO     OHHHHO ",   # no eyes on this side
+    " OHHHBOOOOOOOHHHBO ",   # bumps settle onto a wide head
+    "OHHHHHHHHHHHHHHHHHO",   # crown — brightest, catching the light
+    "OLLLLLLLLLLLLLLLLLO",   # nape
+    " OBBBBBBBBBBBBBBBO ",   # back — midtone, tapering to the waist
+    "   OLLLLLOLLLLLO   ",   # rump: two round cheeks, lit, split by a seam
+    "   OBBBBBOBBBBBO   ",   # cheeks fall to midtone
+    "   ODBBBDODBBBDO   ",   # side rims fall into shadow
+    "    OSDDSOSDDSO    ",   # undersides of the cheeks — deep shadow
+    "  ODBO       OBDO  ",   # legs
+    "  OOO         OOO  ",   # feet
+]
+# The rump is drawn narrower than the head on purpose: it leaves three columns of
+# clearance either side, which is exactly the travel hip_shift needs at full
+# amplitude. Widen the cheeks and the shake clips against the sprite's edge.
+
 # Compact "mood frog" for the statusline (3 char-rows == 6px tall).
 _CHIBI_SRC = [
     " OOOO     OOOO ",   # eye bumps
@@ -336,6 +360,7 @@ def _load(src):
 
 
 FROG = _load(_FROG_SRC)
+FROG_BACK = _load(_FROG_BACK_SRC)
 CHIBI = _load(_CHIBI_SRC)
 
 
@@ -414,6 +439,40 @@ def squash(grid, drop):
         if 0 < r < h - 2:
             remove.add(r)
     return [row for i, row in enumerate(grid) if i not in remove]
+
+
+# The rump band of the back sprite, as a fraction of its height: everything
+# below the waist and above the legs. Expressed as fractions, not row indices,
+# so redrawing FROG_BACK at another size doesn't silently shift what shakes.
+HIP_BAND = (0.5, 0.84)
+
+
+def hip_shift(grid, amount):
+    """Slide only the rump rows sideways — the shake, with the feet planted.
+
+    shear() can't do this: its lever is anchored at the feet and grows toward the
+    head, so it swings the wrong end of the frog. This moves the cheeks alone and
+    leaves head, legs and feet where they are.
+    """
+    dx = int(round(amount))
+    if not dx:
+        return grid
+    h = len(grid)
+    w = len(grid[0])
+    top = int(h * HIP_BAND[0])
+    bot = int(h * HIP_BAND[1])
+    out = []
+    for y, row in enumerate(grid):
+        if not (top <= y < bot):
+            out.append(row)
+            continue
+        shifted = [None] * w
+        for x in range(w):
+            nx = x + dx
+            if 0 <= nx < w:
+                shifted[nx] = row[x]
+        out.append(shifted)
+    return out
 
 
 def flip_h(grid):
@@ -568,6 +627,8 @@ def palette_for(tokens, theme=DEFAULT_THEME):
 #   drop      : rows to squash (crouch)
 #   mirror    : face the other way
 #   flip      : upside down (specials only)
+#   back      : turn his back to you (swaps in the back sprite)
+#   hips      : slide the rump sideways (only means anything with `back`)
 # t runs 0..1 across the move; g is goofiness 0..1.
 
 
@@ -630,12 +691,33 @@ def _m_spinout(t, g):
             "dx": int(round(6 * g * math.sin(t * math.pi * 2)))}
 
 
+def _m_twerk(t, g):
+    """He turns around and shakes it at you. Shameless in direct proportion to g.
+
+    The shake ramps in over the first quarter of the move (so the turn reads as a
+    turn, not a teleport) and the hips lead the bounce: the rump pops sideways on
+    `hips` while the whole frog drops a beat behind it on `dy`.
+
+    `beats` must stay well under half the move's frame count (see SPECIALS): at
+    exactly half, every frame samples the shake at a zero crossing and he just
+    stands there with his back to you. Goofiness buys amplitude, not speed.
+    """
+    beats = 3 + 2 * g                       # pops per move — Nyquist says <12
+    amp = 1 + 2 * g                         # how far the cheeks travel
+    swing = math.sin(t * math.pi * 2 * beats)
+    ramp = math.sin(min(1.0, t * 4) * math.pi / 2)
+    return {"back": True,
+            "hips": amp * ramp * swing,
+            "dy": -abs(int(round((0.6 + 1.4 * g) * ramp * swing))),
+            "shear": 0.5 * g * swing}
+
+
 IDLE_MOVES = [(_m_idle_breathe, 24), (_m_idle_sit, 16), (_m_idle_breathe, 30)]
 ACTIVE_MOVES = [
     (_m_bob, 12), (_m_sway, 16), (_m_hop, 14), (_m_wiggle, 12), (_m_nod, 10),
     (_m_boop(1), 18), (_m_boop(-1), 18),
 ]
-SPECIALS = [(_m_bigjump, 16), (_m_backflip, 18), (_m_spinout, 20)]
+SPECIALS = [(_m_bigjump, 16), (_m_backflip, 18), (_m_spinout, 20), (_m_twerk, 24)]
 
 
 class Choreographer:
@@ -673,16 +755,22 @@ class Choreographer:
         return params
 
 
-def pose(base, blink_overlay, params, palette=RGB, dither=()):
+def pose(base, blink_overlay, params, palette=RGB, dither=(), back=None):
     """Build a colorized pixel sprite for a frame from base grid + params.
 
     `palette` is the (possibly pink-shifted) color map to paint with; it
     defaults to the base green RGB so callers that don't care about the token
     fade — previews, tests — get the plain frog. `dither` is the theme's
     cross-hatch key set (see _colorize), empty for smooth-shaded themes.
+
+    `back` is the turned-around grid (FROG_BACK), swapped in for the `back` param
+    — the only pose that isn't a transform of `base`. Callers with no back view
+    (the statusline chibi) pass none and simply never turn around; blinking is
+    skipped while he's facing away, since his eyes are on the other side.
     """
-    grid = base
-    if params.get("blink"):
+    turned = params.get("back") and back is not None
+    grid = back if turned else base
+    if params.get("blink") and not turned:
         grid = _apply_blink(grid, blink_overlay)
     else:
         grid = [row[:] for row in grid]
@@ -691,11 +779,12 @@ def pose(base, blink_overlay, params, palette=RGB, dither=()):
     if params.get("flip"):
         grid = flip_v(grid)
     px = _colorize(grid, palette, dither)
-    px = shear(px, params.get("shear", 0.0))
     drop = params.get("drop", 0)
     if drop:
-        px = squash(_colorize(grid, palette, dither), drop)
-        px = shear(px, params.get("shear", 0.0))
+        px = squash(px, drop)
+    if turned:
+        px = hip_shift(px, params.get("hips", 0.0))
+    px = shear(px, params.get("shear", 0.0))
     return px
 
 
@@ -1012,7 +1101,7 @@ def mode_dance(opts):
             stage = [[None] * cols for _ in range(stage_h)]
 
             params = chor.step(active, g)
-            sprite = pose(FROG, _FROG_BLINK, params, palette, dither)
+            sprite = pose(FROG, _FROG_BLINK, params, palette, dither, FROG_BACK)
             sh_, sw_ = len(sprite), len(sprite[0])
 
             rest_x = (cols - sw_) // 2         # frog's resting center (props plant here)

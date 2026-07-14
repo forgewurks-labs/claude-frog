@@ -26,7 +26,8 @@ import claude_frog as cf  # noqa: E402
 
 class TestSprites(unittest.TestCase):
     def test_sprites_are_rectangular(self):
-        for name, grid in (("FROG", cf.FROG), ("CHIBI", cf.CHIBI)):
+        for name, grid in (("FROG", cf.FROG), ("FROG_BACK", cf.FROG_BACK),
+                           ("CHIBI", cf.CHIBI)):
             widths = {len(row) for row in grid}
             self.assertEqual(len(widths), 1, f"{name} rows are ragged: {widths}")
 
@@ -35,8 +36,20 @@ class TestSprites(unittest.TestCase):
         self.assertEqual((len(cf.FROG), len(cf.FROG[0])), (12, 19))
         self.assertEqual((len(cf.CHIBI), len(cf.CHIBI[0])), (6, 15))
 
+    def test_back_matches_front_dimensions(self):
+        # he swaps to the back view mid-move; a size change would make him
+        # jump off the floor (base_y is measured from the sprite's height).
+        self.assertEqual((len(cf.FROG_BACK), len(cf.FROG_BACK[0])),
+                         (len(cf.FROG), len(cf.FROG[0])))
+
+    def test_back_view_has_no_face(self):
+        # eyes (P), glint (W) and mouth cream (N/R) are front-only features.
+        used = {ch for row in cf.FROG_BACK for ch in row}
+        self.assertFalse(used & set("PWNR"), "the back view shows a face")
+
     def test_every_palette_key_resolves(self):
-        used = {ch for grid in (cf.FROG, cf.CHIBI) for row in grid for ch in row}
+        used = {ch for grid in (cf.FROG, cf.FROG_BACK, cf.CHIBI)
+                for row in grid for ch in row}
         missing = used - set(cf.RGB)
         self.assertFalse(missing, f"sprite uses keys absent from RGB: {missing}")
 
@@ -71,7 +84,7 @@ class TestRenderPipeline(unittest.TestCase):
         for i in range(600):
             g = (i % 11) / 10.0
             params = chor.step(active=bool(i % 2), g=g)
-            px = cf.pose(cf.FROG, cf._FROG_BLINK, params)
+            px = cf.pose(cf.FROG, cf._FROG_BLINK, params, back=cf.FROG_BACK)
             cf.render_pixels(px)  # must not raise
 
     def test_render_height_halves_pixels(self):
@@ -81,15 +94,64 @@ class TestRenderPipeline(unittest.TestCase):
     def test_transforms_preserve_rectangularity(self):
         px = cf._colorize(cf.FROG)
         for grid in (cf.shear(px, 3.0), cf.flip_h(px), cf.flip_v(px),
-                     cf.squash(px, 2)):
+                     cf.squash(px, 2), cf.hip_shift(cf._colorize(cf.FROG_BACK), 2)):
             widths = {len(r) for r in grid}
             self.assertEqual(len(widths), 1)
+
+
+class TestTwerk(unittest.TestCase):
+    def test_back_param_swaps_the_sprite(self):
+        front = cf.pose(cf.FROG, cf._FROG_BLINK, {}, back=cf.FROG_BACK)
+        turned = cf.pose(cf.FROG, cf._FROG_BLINK, {"back": True}, back=cf.FROG_BACK)
+        self.assertEqual(cf._colorize(cf.FROG_BACK), turned)
+        self.assertNotEqual(front, turned)
+
+    def test_caller_without_a_back_view_keeps_facing_front(self):
+        # the statusline chibi has no back sprite; `back` must be a no-op there.
+        self.assertEqual(cf.pose(cf.CHIBI, cf._CHIBI_BLINK, {"back": True}),
+                         cf.pose(cf.CHIBI, cf._CHIBI_BLINK, {}))
+
+    def test_hip_shift_moves_only_the_rump(self):
+        px = cf._colorize(cf.FROG_BACK)
+        shifted = cf.hip_shift(px, 2)
+        h = len(px)
+        top, bot = int(h * cf.HIP_BAND[0]), int(h * cf.HIP_BAND[1])
+        for y in range(h):
+            if top <= y < bot:
+                self.assertEqual(shifted[y][2:], px[y][:-2], f"row {y} didn't move")
+            else:
+                self.assertEqual(shifted[y], px[y], f"row {y} moved; head/feet must not")
+
+    # the frame count the choreographer will actually run the move at — sample on
+    # that grid, or a shake that aliases away to nothing at render time passes.
+    N = dict((fn, n) for fn, n in cf.SPECIALS)[cf._m_twerk]
+
+    def frames(self, g):
+        return [cf._m_twerk(i / float(self.N), g) for i in range(self.N)]
+
+    def test_twerk_turns_around_and_shakes(self):
+        # the shake ramps in, so sample the whole move, not just the first frames.
+        for g in (0.0, 0.5, 1.0):
+            frames = self.frames(g)
+            self.assertTrue(all(f["back"] for f in frames))
+            # at Nyquist (beats == N/2) every frame lands on a zero crossing and
+            # he'd just stand there with his back turned. Guard the whole range.
+            self.assertTrue(any(abs(f["hips"]) >= 1.0 for f in frames),
+                            f"the cheeks never actually move at g={g}")
+            self.assertTrue(any(f["hips"] > 0 for f in frames)
+                            and any(f["hips"] < 0 for f in frames),
+                            f"he shakes only one way at g={g}")
+
+    def test_twerk_gets_bolder_with_goofiness(self):
+        peak = lambda g: max(abs(f["hips"]) for f in self.frames(g))
+        self.assertGreater(peak(1.0), peak(0.0))
 
 
 class TestThemes(unittest.TestCase):
     def test_every_theme_resolves_all_sprite_keys(self):
         # a theme missing a key would paint a transparent hole in the frog.
-        keys = {ch for grid in (cf.FROG, cf.CHIBI) for row in grid for ch in row}
+        keys = {ch for grid in (cf.FROG, cf.FROG_BACK, cf.CHIBI)
+                for row in grid for ch in row}
         for name, spec in cf.THEMES.items():
             for k in keys:
                 if k in (" ", "."):

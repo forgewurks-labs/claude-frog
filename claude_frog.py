@@ -100,6 +100,13 @@ CACHE_DIR = os.path.join(
     "claude-frog",
 )
 
+# Paneless session state (.think/.ctx from sessions outside tmux, or sessions
+# hard-killed before SessionEnd could clean up) older than this is swept by
+# _prune_stale. Live sessions rewrite their state constantly — the tap on
+# every statusline refresh, the hooks on every prompt — so anything this old
+# is genuinely dead.
+STALE_STATE_SECS = 7 * 24 * 3600
+
 # --------------------------------------------------------------------------- #
 # Palette                                                                      #
 # --------------------------------------------------------------------------- #
@@ -572,6 +579,23 @@ def shake_px(tokens):
     return _clamp(frac) * SHAKE_MAX_PX
 
 
+def _jitter(amp):
+    """One axis of shake: an integer pixel offset from a fractional amplitude.
+
+    Plain int truncation muted any amplitude below 1.0 entirely — on a 200k
+    window shake_px tops out at ~0.88, so the shake never fired at all. Carry
+    the fractional part as a probability instead: amp 0.5 shakes ±1 on about
+    half the frames, so the onset really is continuous from SHAKE_START_TOKENS
+    and grows into steady multi-pixel jitter as amp climbs.
+    """
+    if amp <= 0:
+        return 0
+    mag = int(amp)
+    if random.random() < amp - mag:
+        mag += 1
+    return random.randint(-mag, mag) if mag else 0
+
+
 def pinkness(tokens):
     """0..1 how far the frog has faded from green toward Claude pink.
 
@@ -684,11 +708,16 @@ def _m_boop(direction):
 
 
 # specials (rare; only fire when goofy)
-def _m_bigjump(t, g):
-    span = 6 + int(round(14 * g))
-    return {"dx": int(round((random.choice([-1, 1])) * span * (t))),
-            "dy": -int(round((6 + 8 * g) * math.sin(t * math.pi))),
-            "shear": 2 * math.sin(t * math.pi * 4)}
+def _m_bigjump(direction):
+    """A directed leap. A factory (like _m_boop) so the direction is fixed for
+    the whole move — choosing it per frame made him teleport side to side
+    mid-air instead of leaping one way."""
+    def fn(t, g):
+        span = 6 + int(round(14 * g))
+        return {"dx": int(round(direction * span * t)),
+                "dy": -int(round((6 + 8 * g) * math.sin(t * math.pi))),
+                "shear": 2 * math.sin(t * math.pi * 4)}
+    return fn
 
 
 def _m_backflip(t, g):
@@ -751,8 +780,8 @@ ACTIVE_MOVES = [
     (_m_bob, 12), (_m_sway, 16), (_m_hop, 14), (_m_wiggle, 12), (_m_nod, 10),
     (_m_boop(1), 18), (_m_boop(-1), 18),
 ]
-SPECIALS = [(_m_bigjump, 16), (_m_backflip, 18), (_m_spinout, 20),
-            (_m_twerk, TWERK_FRAMES)]
+SPECIALS = [(_m_bigjump(1), 16), (_m_bigjump(-1), 16), (_m_backflip, 18),
+            (_m_spinout, 20), (_m_twerk, TWERK_FRAMES)]
 
 
 class Choreographer:
@@ -1030,8 +1059,20 @@ class Scene:
 # --------------------------------------------------------------------------- #
 
 
+def _safe_session(session):
+    """Tame a session id for use as a filename and on a tmux command line.
+
+    Session ids come in from an external payload (and the env) but end up
+    joined onto CACHE_DIR and interpolated into the shell command the dance
+    pane is spawned with — so a stray "../" or a space must never survive.
+    Real Claude Code ids are UUIDs, which pass through untouched.
+    """
+    s = "".join(ch for ch in str(session) if ch.isalnum() or ch in "-_")
+    return s[:64] or "default"
+
+
 def _paths(session):
-    base = os.path.join(CACHE_DIR, session)
+    base = os.path.join(CACHE_DIR, _safe_session(session))
     return base + ".think", base + ".ctx", base + ".pane"
 
 
@@ -1097,8 +1138,14 @@ def mode_dance(opts):
     frame = 0
 
     def cleanup(*_):
-        out.write("\x1b[?25h\x1b[0m\x1b[2J\x1b[H")
-        out.flush()
+        # Guarded: if the pane's tty is already gone (tmux killed it out from
+        # under us) the restore write raises EPIPE/EIO — exit quietly anyway
+        # instead of dying a second time inside the exception handler.
+        try:
+            out.write("\x1b[?25h\x1b[0m\x1b[2J\x1b[H")
+            out.flush()
+        except Exception:
+            pass
         raise SystemExit(0)
 
     try:
@@ -1144,8 +1191,8 @@ def mode_dance(opts):
             base_x = rest_x + params.get("dx", 0)
             base_y = stage_h - sh_ + params.get("dy", 0)
             if sk:
-                base_x += random.randint(-int(sk), int(sk))
-                base_y += random.randint(-int(sk), int(sk))
+                base_x += _jitter(sk)
+                base_y += _jitter(sk)
             base_x = max(-2, min(cols - sw_ + 2, base_x))
             base_y = max(-2, min(stage_h - 2, base_y))
 
@@ -1266,19 +1313,26 @@ def _in_tmux():
     return bool(os.environ.get("TMUX"))
 
 
+def _pane_alive(session):
+    """True if the session's recorded frog pane still exists in tmux."""
+    try:
+        pane_path = _paths(session)[2]
+        if not os.path.exists(pane_path):
+            return False
+        pid = open(pane_path).read().strip()
+        r = _tmux("list-panes", "-a", "-F", "#{pane_id}")
+        return bool(r and pid and pid in (r.stdout or "").split())
+    except Exception:
+        return False
+
+
 def _spawn_pane(session, layout=DEFAULT_LAYOUT, theme=DEFAULT_THEME):
     if not _in_tmux():
         return
-    think_path, _, pane_path = _paths(session)
-    # already have a live pane?
-    try:
-        if os.path.exists(pane_path):
-            pid = open(pane_path).read().strip()
-            r = _tmux("list-panes", "-a", "-F", "#{pane_id}")
-            if r and pid and pid in (r.stdout or "").split():
-                return
-    except Exception:
-        pass
+    if _pane_alive(session):
+        return
+    pane_path = _paths(session)[2]
+    import shlex
     py = sys.executable or "python3"
     here = os.path.abspath(__file__)
     # theme is baked into the daemon's command so it stays fixed for the life of
@@ -1287,7 +1341,11 @@ def _spawn_pane(session, layout=DEFAULT_LAYOUT, theme=DEFAULT_THEME):
     # baseline is fixed before the pane exists. Reading it inside the daemon after
     # it boots would race a fast first UserPromptSubmit and eat the first prop.
     since = _read_think(session)[1]
-    cmd = (f"exec {py} {here} dance --session {session} "
+    # tmux runs this through a shell: quote the paths (a checkout under a
+    # directory with a space would otherwise break the spawn silently) and
+    # tame the externally supplied session id.
+    cmd = (f"exec {shlex.quote(py)} {shlex.quote(here)} dance "
+           f"--session {_safe_session(session)} "
            f"--theme {theme} --since {since}")
     # -b puts the new pane *before* the current one: above it for a vertical
     # split, left of it for a horizontal one.
@@ -1322,19 +1380,45 @@ def _kill_pane(session):
 
 
 def _prune_stale():
-    """Remove state for sessions whose pane is gone (best-effort)."""
+    """Remove state for dead sessions (best-effort).
+
+    Two sweeps. First, sessions whose recorded tmux pane is gone — the pane
+    died or tmux was killed. Second, session files with no pane at all:
+    sessions run outside tmux, or hard-killed (crashed terminal, kill-server,
+    OOM) before the SessionEnd hook could clean up, never trip the first
+    sweep, so they used to pile up in CACHE_DIR forever. Those are aged out
+    once they're older than STALE_STATE_SECS (this also catches orphaned
+    .tmp files from interrupted writes). Every file is guarded on its own so
+    one unreadable entry can't stop the rest of the sweep.
+    """
     try:
-        r = _tmux("list-panes", "-a", "-F", "#{pane_id}")
-        live = set((r.stdout or "").split()) if r else set()
-        for fn in os.listdir(CACHE_DIR):
-            if fn.endswith(".pane"):
-                p = os.path.join(CACHE_DIR, fn)
-                pid = open(p).read().strip()
-                if pid and pid not in live:
-                    sess = fn[:-5]
-                    _cleanup_session(sess)
+        names = os.listdir(CACHE_DIR)
     except Exception:
-        pass
+        return
+    r = _tmux("list-panes", "-a", "-F", "#{pane_id}")
+    live = set((r.stdout or "").split()) if r else set()
+    tracked = set()          # sessions that still have a live pane
+    for fn in names:
+        if not fn.endswith(".pane"):
+            continue
+        try:
+            pid = open(os.path.join(CACHE_DIR, fn)).read().strip()
+            if pid and pid in live:
+                tracked.add(fn[:-5])
+            else:
+                _cleanup_session(fn[:-5])
+        except Exception:
+            pass
+    cutoff = time.time() - STALE_STATE_SECS
+    for fn in names:
+        if fn.endswith(".pane") or fn.split(".")[0] in tracked:
+            continue
+        try:
+            p = os.path.join(CACHE_DIR, fn)
+            if os.path.getmtime(p) < cutoff:
+                os.remove(p)
+        except Exception:
+            pass
 
 
 def _cleanup_session(session):
@@ -1359,7 +1443,6 @@ def mode_hook(opts):
 
     if event == "SessionStart":
         _prune_stale()
-        _, turns = _read_think(session)
         _write_json(think_path, {"state": "idle", "turns": 0, "ts": time.time()})
         _spawn_pane(session, opts.get("layout", DEFAULT_LAYOUT),
                     opts.get("theme", DEFAULT_THEME))
@@ -1398,10 +1481,13 @@ def mode_toggle(opts):
     session = opts.get("session") or _current_session_guess()
     if not session:
         sys.exit(0)
-    _, _, pane_path = _paths(session)
-    if os.path.exists(pane_path):
+    # Key off pane LIVENESS, not the mere presence of the .pane file: after a
+    # hand-killed pane (tmux kill-pane) the stale file used to make the first
+    # keypress a silent no-op, so summoning him back took two presses.
+    if _pane_alive(session):
         _kill_pane(session)
     else:
+        _kill_pane(session)          # clear any stale record first
         _spawn_pane(session, opts.get("layout", DEFAULT_LAYOUT),
                     opts.get("theme", DEFAULT_THEME))
     sys.exit(0)

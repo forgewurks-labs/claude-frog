@@ -14,6 +14,8 @@ import math
 import os
 import subprocess
 import sys
+import tempfile
+import time
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -22,6 +24,12 @@ SCRIPT = os.path.join(ROOT, "claude_frog.py")
 sys.path.insert(0, ROOT)
 
 import claude_frog as cf  # noqa: E402
+
+# Every CLI subprocess below runs with an isolated XDG_CACHE_HOME: the tap and
+# hook modes write session state under the cache dir, and without this the
+# test run pollutes the user's real ~/.cache/claude-frog (which it did).
+_CACHE_TMP = tempfile.TemporaryDirectory(prefix="claude-frog-tests-")
+ENV = {**os.environ, "XDG_CACHE_HOME": _CACHE_TMP.name}
 
 
 class TestSprites(unittest.TestCase):
@@ -271,6 +279,109 @@ class TestGauges(unittest.TestCase):
         self.assertEqual(cf.shake_px(cf.SHAKE_START_TOKENS), 0.0)
         self.assertEqual(cf.shake_px(10 ** 9), float(cf.SHAKE_MAX_PX))
 
+    def test_zero_amplitude_never_jitters(self):
+        self.assertTrue(all(cf._jitter(0.0) == 0 for _ in range(50)))
+
+    def test_fractional_amplitude_actually_shakes(self):
+        # THE regression: on a 200k window shake_px never exceeds ~0.88, and
+        # int-truncating that muted the shake entirely — the "deep in it"
+        # canary could never fire on the standard window.
+        import random
+        random.seed(7)
+        sk = cf.shake_px(190_000)
+        self.assertTrue(0.0 < sk < 1.0, f"expected a sub-pixel amplitude, got {sk}")
+        self.assertTrue(any(cf._jitter(sk) != 0 for _ in range(300)),
+                        "a sub-pixel amplitude never produced any jitter")
+
+    def test_jitter_is_bounded_by_the_amplitude_ceiling(self):
+        import random
+        random.seed(8)
+        for amp in (0.3, 0.9, 1.5, float(cf.SHAKE_MAX_PX)):
+            for _ in range(200):
+                self.assertLessEqual(abs(cf._jitter(amp)), math.ceil(amp))
+
+
+class TestBigJump(unittest.TestCase):
+    def test_direction_is_fixed_for_the_whole_move(self):
+        # picking a fresh random direction every frame made the leap teleport
+        # side to side mid-air instead of travelling one way.
+        for direction in (1, -1):
+            fn = cf._m_bigjump(direction)
+            dxs = [fn(i / 16.0, 1.0)["dx"] for i in range(16)]
+            self.assertTrue(all(dx * direction >= 0 for dx in dxs),
+                            f"dx changed sign against direction={direction}: {dxs}")
+            self.assertTrue(any(dx != 0 for dx in dxs), "he never travelled")
+
+    def test_both_directions_are_in_the_specials_pool(self):
+        signs = {1 if fn(1.0, 1.0)["dx"] > 0 else -1
+                 for fn, _n in cf.SPECIALS
+                 if fn.__qualname__.startswith("_m_bigjump")}
+        self.assertEqual(signs, {1, -1})
+
+
+class TestSessionState(unittest.TestCase):
+    def test_uuid_session_ids_pass_through(self):
+        u = "70dfd0a1-58f6-4d2f-b121-c11b1b1766c8"
+        self.assertEqual(cf._safe_session(u), u)
+
+    def test_hostile_session_ids_are_tamed(self):
+        self.assertEqual(cf._safe_session("../../etc/passwd"), "etcpasswd")
+        self.assertEqual(cf._safe_session(""), "default")
+        self.assertNotIn(" ", cf._safe_session("a b; rm -rf ~"))
+
+    def test_paths_stay_inside_cache_dir(self):
+        for s in ("../evil", "a/b/c", "x y", "ok-session_1"):
+            for p in cf._paths(s):
+                self.assertEqual(os.path.dirname(p), cf.CACHE_DIR, p)
+
+
+class TestPruneStale(unittest.TestCase):
+    """_prune_stale must sweep dead sessions without touching live ones."""
+
+    def setUp(self):
+        import shutil
+        self._old = cf.CACHE_DIR
+        cf.CACHE_DIR = tempfile.mkdtemp(prefix="frog-prune-")
+        self.addCleanup(setattr, cf, "CACHE_DIR", self._old)
+        self.addCleanup(shutil.rmtree, cf.CACHE_DIR, True)
+
+    def _touch(self, name, age_secs):
+        p = os.path.join(cf.CACHE_DIR, name)
+        with open(p, "w") as f:
+            f.write("{}")
+        old = time.time() - age_secs
+        os.utime(p, (old, old))
+        return p
+
+    def test_paneless_state_is_aged_out(self):
+        # a hard-killed (or non-tmux) session never gets a .pane file, so the
+        # pane sweep can't see it — it used to sit in CACHE_DIR forever.
+        week_plus = cf.STALE_STATE_SECS + 3600
+        dead = [self._touch("dead.think", week_plus),
+                self._touch("dead.ctx", week_plus),
+                self._touch("dead.ctx.tmp", week_plus)]
+        fresh = self._touch("live.think", 60)
+        cf._prune_stale()
+        for p in dead:
+            self.assertFalse(os.path.exists(p), f"stale file survived: {p}")
+        self.assertTrue(os.path.exists(fresh), "fresh state was swept")
+
+    def test_dead_pane_session_is_cleaned_regardless_of_age(self):
+        pane = os.path.join(cf.CACHE_DIR, "gone.pane")
+        with open(pane, "w") as f:
+            f.write("%99999")           # a pane id tmux won't know
+        think = self._touch("gone.think", 60)
+        cf._prune_stale()
+        self.assertFalse(os.path.exists(pane))
+        self.assertFalse(os.path.exists(think))
+
+    def test_one_bad_file_does_not_stop_the_sweep(self):
+        bad = os.path.join(cf.CACHE_DIR, "unreadable.pane")
+        os.mkdir(bad)                   # open() on a directory raises
+        stale = self._touch("dead.ctx", cf.STALE_STATE_SECS + 3600)
+        cf._prune_stale()               # must not raise
+        self.assertFalse(os.path.exists(stale), "sweep stopped at the bad file")
+
 
 class TestCliModesExitZero(unittest.TestCase):
     """The statusline / tap / hook / preview paths must never break a prompt."""
@@ -278,7 +389,7 @@ class TestCliModesExitZero(unittest.TestCase):
     def _run(self, args, stdin=""):
         return subprocess.run(
             [sys.executable, SCRIPT, *args], input=stdin,
-            capture_output=True, text=True, timeout=15,
+            capture_output=True, text=True, timeout=15, env=ENV,
         )
 
     def test_preview(self):
@@ -334,7 +445,7 @@ class TestInstallSettings(unittest.TestCase):
     def _run(self, path, extra=()):
         return subprocess.run(
             [sys.executable, SCRIPT, "install-settings", "--settings", path, *extra],
-            capture_output=True, text=True, timeout=15,
+            capture_output=True, text=True, timeout=15, env=ENV,
         )
 
     def _tmp(self, text=None):
@@ -427,7 +538,7 @@ class TestUninstallSettings(unittest.TestCase):
     def _run(self, mode, path, extra=()):
         return subprocess.run(
             [sys.executable, SCRIPT, mode, "--settings", path, *extra],
-            capture_output=True, text=True, timeout=15,
+            capture_output=True, text=True, timeout=15, env=ENV,
         )
 
     def test_install_then_uninstall_round_trips(self):
@@ -471,7 +582,7 @@ class TestDoctor(unittest.TestCase):
         return subprocess.run(
             [sys.executable, SCRIPT, "doctor",
              "--settings", settings, "--rc", rc, *extra],
-            capture_output=True, text=True, timeout=15,
+            capture_output=True, text=True, timeout=15, env=ENV,
         )
 
     def test_fails_when_nothing_wired(self):
@@ -484,7 +595,8 @@ class TestDoctor(unittest.TestCase):
         d = self._tmp_dir()
         settings = os.path.join(d, "settings.json")
         subprocess.run([sys.executable, SCRIPT, "install-settings",
-                        "--settings", settings], capture_output=True, timeout=15)
+                        "--settings", settings], capture_output=True,
+                       timeout=15, env=ENV)
         rc = os.path.join(d, "rc")
         with open(rc, "w") as f:
             f.write(f"# {cf.MARKER}\nsource whatever\n")
@@ -505,7 +617,8 @@ class TestDoctor(unittest.TestCase):
         d = self._tmp_dir()
         settings = os.path.join(d, "settings.json")
         subprocess.run([sys.executable, SCRIPT, "install-settings",
-                        "--settings", settings], capture_output=True, timeout=15)
+                        "--settings", settings], capture_output=True,
+                       timeout=15, env=ENV)
         with open(settings) as f:
             data = json.load(f)
         data["statusLine"] = {"type": "command", "command": "/usr/local/bin/my-bar"}

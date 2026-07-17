@@ -3,14 +3,14 @@
 #
 # By DEFAULT it sets up the whole thing so you actually SEE him:
 #   1. the `claude <THEME>` launcher (a source line in your shell rc), and
-#   2. the statusline frog + dance hooks (merged into ~/.claude/settings.json,
-#      preserving everything already there and backing the file up first).
+#   2. the token feed (a silent statusLine `tap`) + dance hooks (merged into
+#      ~/.claude/settings.json, preserving everything already there and backing
+#      the file up first). The frog himself dances in a tmux pane.
 # It shows you exactly what it will touch and asks once before editing.
 #
 # Usage:
-#     ./install.sh                 # the full frog (launcher + statusline + hooks)
+#     ./install.sh                 # the full frog (launcher + tap + hooks)
 #     ./install.sh --minimal       # ONLY the `claude <THEME>` launcher, no settings edits
-#     ./install.sh --tap           # full, but keep your own status bar (silent tap)
 #     ./install.sh --yes           # don't prompt — assume yes (for automation)
 #     ./install.sh --uninstall     # remove everything this installer added
 #     ./install.sh ~/.bashrc       # force which rc file to write
@@ -22,14 +22,13 @@ FROG="$ROOT/claude_frog.py"
 MARKER="claude-frog theme launcher"   # keep in sync with MARKER in claude_frog.py
 
 MINIMAL=0
-SL_MODE="statusline"
 ASSUME_YES=0
 UNINSTALL=0
 RC=""
 for a in "$@"; do
   case "$a" in
     --minimal)      MINIMAL=1 ;;
-    --tap)          SL_MODE="tap" ;;
+    --tap)          : ;;   # back-compat no-op: tap is now the only statusLine mode
     --yes|-y)       ASSUME_YES=1 ;;
     --uninstall)    UNINSTALL=1 ;;
     --with-frog)    : ;;   # back-compat no-op: the full frog is now the default
@@ -105,13 +104,13 @@ in_tmux=0; [ -n "${TMUX:-}" ] && in_tmux=1
 echo "🐸 Claude Frog will:"
 echo "   • add the launcher line to  $RC        (so \`claude SEGA\` works)"
 if [ "$MINIMAL" != 1 ]; then
-  echo "   • wire the statusline frog + hooks into  $SETTINGS"
+  echo "   • wire the token feed (a silent statusLine tap) + dance hooks into  $SETTINGS"
   echo "     (preserves everything already there; backs it up first)"
   if [ "$in_tmux" = 1 ]; then
-    echo "   • you're in tmux → you also get the dancing pane frog 🕺"
+    echo "   • you're in tmux → you get the dancing pane frog 🕺"
   else
-    echo "   • you're not in tmux → you'll get the statusline frog."
-    echo "     Want the full dancing pane too? Add tmux + WezTerm (see README)."
+    echo "   • you're not in tmux → the frog dances in a tmux pane, so you"
+    echo "     won't see him yet. Add tmux + WezTerm for the show (see README)."
   fi
 fi
 echo
@@ -134,12 +133,12 @@ else
   LAUNCHER_CHANGED=1
 fi
 
-# --- 2. the frog itself (statusline + hooks), unless --minimal -------------- #
+# --- 2. the frog itself (token feed + hooks), unless --minimal -------------- #
 if [ "$MINIMAL" != 1 ]; then
   echo
-  echo "🐸 Wiring up the frog (statusline + hooks)…"
+  echo "🐸 Wiring up the frog (token feed + hooks)…"
   # Capture so we can tell "wired something" from an idempotent no-op.
-  out="$(python3 "$FROG" install-settings --statusline-mode "$SL_MODE")"
+  out="$(python3 "$FROG" install-settings)"
   printf '%s\n' "$out"
   case "$out" in *"Wired the frog"*) SETTINGS_CHANGED=1 ;; esac
 fi
@@ -158,7 +157,7 @@ if [ "$LAUNCHER_CHANGED" = 1 ] || [ "$SETTINGS_CHANGED" = 1 ]; then
   [ "$LAUNCHER_CHANGED" = 1 ] && \
     echo "   • $RC — added the launcher (look for the '$MARKER' comment)"
   if [ "$SETTINGS_CHANGED" = 1 ]; then
-    echo "   • $SETTINGS — added the statusline frog + hooks"
+    echo "   • $SETTINGS — added the token feed (tap) + hooks"
     echo "     (your previous file is saved at $SETTINGS.bak)"
   fi
 else

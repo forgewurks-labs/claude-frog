@@ -8,7 +8,7 @@
 # Everything after the pipe is forwarded to install.sh, e.g.:
 #
 #   curl -fsSL …/bootstrap.sh | bash -s -- --minimal
-#   curl -fsSL …/bootstrap.sh | bash -s -- --tap
+#   curl -fsSL …/bootstrap.sh | bash -s -- --yes
 #
 # Prefer to read before you run? The transparent equivalent is:
 #

@@ -4,7 +4,7 @@
 
   "statusLine": {
     "type": "command",
-    "command": "python3 /path/to/claude-frog/claude_frog.py statusline"
+    "command": "python3 /path/to/claude-frog/claude_frog.py tap"
   },
 
   "hooks": {

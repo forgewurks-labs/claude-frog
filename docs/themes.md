@@ -10,10 +10,11 @@ rely on it — the code is the source of truth.
 
 - **One sprite, many poses.** The frog's motion is squeezed out of a *single*
   base sprite via the `shear` / `squash` / `flip_*` grid transforms plus a
-  `Choreographer` that picks moves and emits per-frame pose params. There are
-  two sprites: `FROG` (the tmux pane frog) and `CHIBI` (the compact statusline
-  frog). Their dimensions are asserted in the tests — `FROG` is 12 rows × 19
-  cols, `CHIBI` is 6 × 15 — because motion and pane sizing assume them.
+  `Choreographer` that picks moves and emits per-frame pose params. The sprite
+  is `FROG` (plus its turned-around twin `FROG_BACK`); its dimensions are
+  asserted in the tests — 12 rows × 19 cols — because motion and pane sizing
+  assume them. (`CHIBI`, the compact statusline frog, was retired along with
+  the in-bar statusline mode.)
 - **Look = palette.** A sprite is a grid of single-char *palette keys* (`O`
   outline, `H` highlight, `B` body midtone, `P` eyes, …). Colorizing maps each
   key to an `(r, g, b)` or `None` (transparent) via a palette dict. So the whole
@@ -32,8 +33,8 @@ Everything reactive is a token-driven `0..1` scalar:
 - `pinkness(tokens)` / `palette_for(tokens, theme)` — the green→pink color fade,
   fully pink by `PINK_FULL_TOKENS` (200k).
 
-Tokens come **only** from the statusline `_tap` payload — hooks are token-blind.
-A pane-only setup with no statusline falls back to a turn-count ramp for
+Tokens come **only** from the statusLine payload via `tap` — hooks are
+token-blind. A setup with no tap wired falls back to a turn-count ramp for
 goofiness and simply stays fresh-colored.
 
 ## Themes
@@ -96,9 +97,9 @@ is honored **everywhere** a theme
 is named:
 
 - **`--theme <name>`** on any invocation.
-- **`CLAUDE_FROG_THEME`** env var (mirrors `CLAUDE_FROG_LAYOUT`). The statusline
-  reads it each refresh; the `SessionStart` hook bakes `--theme` into the
-  spawned dance daemon so it stays fixed for that session's pane.
+- **`CLAUDE_FROG_THEME`** env var (mirrors `CLAUDE_FROG_LAYOUT`). The
+  `SessionStart` hook bakes `--theme` into the spawned dance daemon so it stays
+  fixed for that session's pane.
 - **`claude SNES` / `claude SEGA` / `claude GBA`** — the launcher, below.
 
 Whatever the route, an **unset or unrecognized theme falls back to
@@ -130,17 +131,20 @@ in turn locates `claude_frog.py` relative to its own path (via `BASH_SOURCE` /
 zsh `%x`), so there's nothing to hand-edit; export `CLAUDE_FROG` before sourcing
 to override.
 
-### `install.sh --with-frog` — wire up the visible frog too
+### `install.sh` — wire up the working frog too
 
-The launcher only sets *which theme*; you still need the frog's statusline +
-hooks installed to see anything. `./install.sh --with-frog` handles that by
-calling the **`install-settings` CLI mode**, which merges into
+The launcher only sets *which theme*; you still need the frog's token feed +
+hooks installed for his pane to work. The default `./install.sh` handles that
+by calling the **`install-settings` CLI mode**, which merges into
 `~/.claude/settings.json` (path overridable with `--settings`, or the
 `CLAUDE_CONFIG_DIR` env var):
 
-- Adds a `statusLine` running `… statusline` (or `… tap` with `--tap`) — but
-  only if you don't already have one; an existing statusLine is never clobbered
+- Adds a `statusLine` running `… tap` (the silent token feed) — but only if you
+  don't already have one; an existing non-frog statusLine is never clobbered
   (Claude Code allows just one), and you're pointed at `statusline-compose.sh`.
+  A frog statusLine still on the deprecated `statusline` mode is migrated to
+  `tap` (the in-bar mood frog is retired; the CLI mode survives purely as a
+  tap alias so old wirings keep feeding the gauge).
 - Appends a frog hook group to each of `FROG_HOOK_EVENTS` (`SessionStart`,
   `UserPromptSubmit`, `Stop`, `SessionEnd`), skipping any event that already has
   one.
@@ -163,9 +167,9 @@ python3 assets/gen_screenshots.py
 
 ## Hard rules
 
-- The **statusline / tap / hook paths never crash and always exit 0** — a broken
-  frog must never break your prompt. New color/animation work must preserve
-  this.
+- The **tap / hook paths never crash and always exit 0** (including the
+  deprecated `statusline` alias) — a broken frog must never break your prompt.
+  New color/animation work must preserve this.
 - **Standard library only** — no third-party deps, anywhere (including the
   screenshot generator).
 - Tests live in `tests/test_frog.py` (`python3 -m unittest discover -s tests`);

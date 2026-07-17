@@ -5,8 +5,10 @@ One file, standard library only. Two jobs:
 
   * `dance`       — the tmux-pane daemon: a smooth pixel frog who dances while
                     your turn is running and idles between turns.
-  * `statusline`  — a compact 3-row "mood frog" for the Claude Code status bar
-                    (drop-in and shareable; friends need only this file).
+  * `tap`         — the statusLine command: reads the token payload Claude Code
+                    hands the status bar, publishes the gauge for the pane, and
+                    prints nothing. (`statusline`, the old in-bar mood frog, is
+                    deprecated and now behaves exactly like `tap`.)
 
 He is also a gauge. The more context you've burned, the goofier he gets, and
 past ~150k tokens he starts to shake — an honest "you're deep in it, quality's
@@ -20,7 +22,7 @@ and `terraria` (high-fidelity warm, painterly indie). Pick one per session with
 `--theme` or `CLAUDE_FROG_THEME`; each keeps the green->pink context gauge in its
 own idiom.
 
-Design discipline: the statusline and hook paths NEVER crash and always exit 0
+Design discipline: the tap and hook paths NEVER crash and always exit 0
 — a broken frog must never break your prompt. Imports stay light (stdlib only).
 
 See README.md for install. Everything below is tunable via the constants block.
@@ -74,7 +76,7 @@ LAYOUTS = {
 DEFAULT_LAYOUT = "top"
 
 # Fallback goofiness when no token data is available (pane-only friend with no
-# statusline feeding tokens): ramp on turn count instead — unhinged by turn 4.
+# tap feeding tokens): ramp on turn count instead — unhinged by turn 4.
 FALLBACK_UNHINGED_TURNS = 4
 
 # Environment / flora: each user prompt sprouts one random prop (flower, cloud,
@@ -336,20 +338,6 @@ _FROG_BACK_SRC = [
 # clearance either side, which is exactly the travel hip_shift needs at full
 # amplitude. Widen the cheeks and the shake clips against the sprite's edge.
 
-# Compact "mood frog" for the statusline (3 char-rows == 6px tall).
-_CHIBI_SRC = [
-    " OOOO     OOOO ",   # eye bumps
-    " OWPO     OWPO ",   # eyes + glint
-    "OHPPBOOOOOHPPBO",   # head bridge (highlit)
-    "OLLLLLLLLLLLLLO",   # lit upper face
-    "ODBBONNNNNOBBDO",   # open mouth, shadowed rims
-    " OSDDOOOOODDSO ",   # bottom lip / jaw in shadow
-]
-_CHIBI_BLINK = {
-    1: " OHHO     OHHO ",
-    2: "OH__BOOOOOH__BO",
-}
-
 Pixel = tuple  # (r, g, b) or None
 
 
@@ -361,7 +349,6 @@ def _load(src):
 
 FROG = _load(_FROG_SRC)
 FROG_BACK = _load(_FROG_BACK_SRC)
-CHIBI = _load(_CHIBI_SRC)
 
 
 def _apply_blink(grid, overlay):
@@ -589,7 +576,7 @@ def pinkness(tokens):
     """0..1 how far the frog has faded from green toward Claude pink.
 
     Linear from the first token to PINK_FULL_TOKENS. Unknown token count (a
-    pane-only friend with no statusline feeding the gauge) stays green.
+    pane-only friend with no tap feeding the gauge) stays green.
     """
     if tokens is None:
         return 0.0
@@ -813,8 +800,8 @@ def pose(base, blink_overlay, params, palette=RGB, dither=(), back=None):
 
     `back` is the turned-around grid (FROG_BACK), swapped in for the `back` param
     — the only pose that isn't a transform of `base`. Callers with no back view
-    (the statusline chibi) pass none and simply never turn around; blinking is
-    skipped while he's facing away, since his eyes are on the other side.
+    pass none and simply never turn around; blinking is skipped while he's
+    facing away, since his eyes are on the other side.
     """
     turned = params.get("back") and back is not None
     grid = back if turned else base
@@ -841,8 +828,8 @@ def pose(base, blink_overlay, params, palette=RGB, dither=(), back=None):
 # Environment — props that sprout around the frog, one per user prompt          #
 # --------------------------------------------------------------------------- #
 # A little diorama that fills in as you work: every prompt the dance pane sprouts
-# one random prop, animated in and then left standing. Pane-only eye candy (the
-# statusline has no room), held purely in the daemon's memory so the scene grows
+# one random prop, animated in and then left standing. Pane-only eye candy,
+# held purely in the daemon's memory so the scene grows
 # through a session and resets when the pane respawns. Props are painted BEHIND
 # the frog so he always stands in the foreground.
 #
@@ -1193,7 +1180,7 @@ def mode_dance(opts):
 
 
 # --------------------------------------------------------------------------- #
-# Modes: tap (silent token gauge) + statusline (mood frog on top of the tap)   #
+# Mode: tap (silent token gauge — the statusLine command)                      #
 # --------------------------------------------------------------------------- #
 
 
@@ -1222,9 +1209,9 @@ def _extract_tokens(payload):
 
 
 def _tap(payload=None):
-    """Read the statusline payload and publish the token gauge to session state.
+    """Read the statusLine payload and publish the token gauge to session state.
 
-    The statusline is the only surface Claude Code hands token usage to — hooks
+    The statusLine is the only surface Claude Code hands token usage to — hooks
     are token-blind — so this is the sole source of the pane daemon's gauge.
     Returns (session, tokens); tokens is None if the payload didn't carry any.
     """
@@ -1249,41 +1236,15 @@ def _tap(payload=None):
 def mode_tap():
     """Feed the gauge, render nothing.
 
-    For a pane-only setup: keep the frog out of your status bar while the
-    dancing pane still gets honest token-driven goofiness and shake. Wire it in
-    as a statusLine command whose output you discard (or append to your own).
+    The only surface Claude Code hands token usage to is the statusLine, so the
+    dancing pane's goofiness / shake / pink fade all depend on this being wired
+    there. It prints nothing — your status bar stays yours (or empty).
+
+    The old `statusline` mode (a mood frog drawn in the status bar itself) is
+    deprecated: it now lands here too, so existing settings.json wirings keep
+    feeding the pane and simply stop drawing in the bar.
     """
     _tap()
-    sys.exit(0)
-
-
-def mode_statusline(opts):
-    session, tokens = _tap()
-    theme = opts.get("theme", DEFAULT_THEME)
-
-    state, turns = _read_think(session)
-    active = state == "thinking"
-    g = goofiness(tokens, turns)
-
-    # time-based frame (statusline is stateless / re-invoked each refresh, so we
-    # derive the current pose from the wall clock rather than a counter file).
-    frame = int(time.time() * (FPS_ACTIVE if active else FPS_IDLE))
-    params = {
-        # a compact "mood frog": upright, leaning harder the goofier he gets
-        "shear": (1 + 3 * g) * math.sin(frame * 0.7) if active else 0.0,
-        "blink": (frame % 20) == 0,
-    }
-
-    sprite = pose(CHIBI, _CHIBI_BLINK, params, palette_for(tokens, theme),
-                  theme_spec(theme)["dither"])
-    rows = render_pixels(sprite)
-
-    sk = shake_px(tokens)
-    if sk:
-        pad = " " * random.randint(0, int(sk) + 1)
-        rows = [pad + r for r in rows]
-
-    sys.stdout.write("\n".join(rows) + _RESET + "\n")
     sys.exit(0)
 
 
@@ -1469,12 +1430,11 @@ _SHADE = {"O": "#", "H": "^", "L": "+", "B": "@", "D": "o", "S": "=",
 
 
 def mode_preview(opts):
-    """Dev aid: print sprites as plain ASCII so you can eyeball the silhouette."""
-    which = opts.get("which", "frog")
+    """Dev aid: print the sprite as plain ASCII so you can eyeball the silhouette."""
     theme = opts.get("theme", DEFAULT_THEME)
     spec = theme_spec(theme)
-    src = FROG if which != "chibi" else CHIBI
-    print(f"--- {which} silhouette ({len(src[0])}w x {len(src)}h px) ---")
+    src = FROG
+    print(f"--- frog silhouette ({len(src[0])}w x {len(src)}h px) ---")
     for row in src:
         print("".join(_SHADE.get(ch, "?") for ch in row))
     print(f"\n--- {theme} render (ANSI; may show as blocks) ---")
@@ -1492,7 +1452,7 @@ MARKER = "claude-frog theme launcher"
 
 
 def _frog_cmd(kind):
-    """The command string baked into settings.json for `kind` (hook/statusline)."""
+    """The command string baked into settings.json for `kind` (hook/tap)."""
     return f"python3 {os.path.abspath(__file__)} {kind}"
 
 
@@ -1512,22 +1472,25 @@ def _event_has_frog_hook(groups):
 
 
 def mode_install_settings(opts):
-    """Merge the frog's statusLine + hooks into ~/.claude/settings.json.
+    """Merge the frog's statusLine tap + hooks into ~/.claude/settings.json.
 
     Deliberately conservative: preserves everything already in the file, backs
     it up first, and is idempotent (re-running changes nothing). An existing
     non-frog statusLine is left untouched — Claude Code allows only one, so we
     won't clobber yours; the message points you at the compose wrapper instead.
-    Unlike the hook/statusline paths this is an explicit action, so it may fail
+    A frog statusLine still on the deprecated `statusline` mode is migrated to
+    `tap`. Unlike the tap/hook paths this is an explicit action, so it may fail
     loudly rather than swallowing errors.
     """
     path = opts.get("settings") or os.path.join(
         os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude"),
         "settings.json",
     )
-    sl_mode = opts.get("statusline_mode") or "statusline"
-    if sl_mode not in ("statusline", "tap", "none"):
-        sl_mode = "statusline"
+    # "statusline" (the deprecated in-bar frog) and anything unrecognized both
+    # land on tap; "none" skips the statusLine entirely.
+    sl_mode = opts.get("statusline_mode") or "tap"
+    if sl_mode != "none":
+        sl_mode = "tap"
 
     # Load existing settings, refusing to clobber a file we can't parse.
     data = {}
@@ -1553,15 +1516,23 @@ def mode_install_settings(opts):
     # statusLine (only one allowed) — add if absent, never overwrite yours.
     if sl_mode != "none":
         sl = data.get("statusLine")
+        cmd = (sl or {}).get("command") if isinstance(sl, dict) else None
         if not sl:
-            data["statusLine"] = {"type": "command", "command": _frog_cmd(sl_mode)}
-            changed.append(f"statusLine → {sl_mode}")
-        elif _is_frog_cmd((sl or {}).get("command")):
-            notes.append("statusLine already runs the frog — left as-is")
+            data["statusLine"] = {"type": "command", "command": _frog_cmd("tap")}
+            changed.append("statusLine → tap (token feed)")
+        elif _is_frog_cmd(cmd):
+            if cmd.rstrip().endswith(" statusline"):
+                data["statusLine"] = {"type": "command",
+                                      "command": _frog_cmd("tap")}
+                changed.append("statusLine: statusline → tap "
+                               "(the in-bar frog is deprecated)")
+            else:
+                notes.append("statusLine already taps the frog — left as-is")
         else:
             notes.append(
-                "you already have a statusLine — left as-is. To show the frog "
-                "too, wrap both via install/statusline-compose.sh")
+                "you already have a statusLine — left as-is. Make sure it "
+                "pipes the payload to `claude_frog.py tap` (see "
+                "install/statusline-compose.sh) or the pane loses its gauge")
 
     # hooks — append a frog group per event, skipping any already present.
     hooks = data.setdefault("hooks", {})
@@ -1686,10 +1657,10 @@ def mode_doctor(opts):
     """A green/amber checkup so a first-timer KNOWS it worked.
 
     Verifies the five things that make the frog appear — python3, the launcher
-    line, the statusline wiring, the dance hooks, a resolvable theme — plus a
-    non-critical note on tmux (needed only for the dancing pane). Exits non-zero
-    only if a *critical* piece is missing, so callers can gate on it; the tmux
-    note never fails the check.
+    line, the token-feed (tap) wiring, the dance hooks, a resolvable theme —
+    plus a non-critical note on tmux (where the frog actually lives). Exits
+    non-zero only if a *critical* piece is missing, so callers can gate on it;
+    the tmux note never fails the check.
     """
     C_OK = "\033[38;2;120;200;120m"
     C_WARN = "\033[38;2;230;180;90m"
@@ -1717,11 +1688,12 @@ def mode_doctor(opts):
                  f"in {found_rc}" if found_rc
                  else "not found in your shell rc — run install.sh"))
 
-    # settings.json: statusline + hooks. In --minimal mode the user deliberately
-    # skipped these, so they're informational, not failures.
+    # settings.json: token feed (tap) + hooks. In --minimal mode the user
+    # deliberately skipped these, so they're informational, not failures.
     minimal = bool(opts.get("minimal"))
     path = _settings_path(opts)
     sl_ok = hooks_ok = False
+    foreign_sl = False
     detail = "not wired — run install.sh"
     data = None
     if os.path.exists(path):
@@ -1732,16 +1704,26 @@ def mode_doctor(opts):
         except ValueError:
             detail = f"{path} isn't valid JSON"
     if isinstance(data, dict):
-        sl_ok = _is_frog_cmd((data.get("statusLine") or {}).get("command"))
+        sl_cmd = (data.get("statusLine") or {}).get("command")
+        sl_ok = _is_frog_cmd(sl_cmd)
+        foreign_sl = bool(sl_cmd) and not sl_ok
         hk = data.get("hooks") or {}
         hooks_ok = isinstance(hk, dict) and all(
             _event_has_frog_hook(hk.get(ev)) for ev in FROG_HOOK_EVENTS)
     if minimal and not sl_ok:
-        rows.append(("Statusline frog", True, False, "skipped (--minimal)"))
+        rows.append(("Token feed (tap)", True, False, "skipped (--minimal)"))
         rows.append(("Dance hooks", True, False, "skipped (--minimal)"))
     else:
-        rows.append(("Statusline frog", sl_ok, True,
-                     f"wired into {path}" if sl_ok else detail))
+        if sl_ok:
+            rows.append(("Token feed (tap)", True, True, f"wired into {path}"))
+        elif foreign_sl:
+            # Your own statusLine — can't verify it taps, so warn without
+            # failing the checkup.
+            rows.append(("Token feed (tap)", False, False,
+                         "you have your own statusLine — make sure it pipes "
+                         "the payload to `claude_frog.py tap`"))
+        else:
+            rows.append(("Token feed (tap)", False, True, detail))
         rows.append(("Dance hooks", hooks_ok, False,
                      "all 4 events wired" if hooks_ok
                      else "some hooks missing — re-run install.sh"))
@@ -1754,8 +1736,8 @@ def mode_doctor(opts):
     in_tmux = bool(os.environ.get("TMUX"))
     rows.append(("Dancing pane (tmux)", in_tmux, False,
                  "in tmux — you get the full show" if in_tmux
-                 else "not in tmux — statusline frog only "
-                      "(add tmux + WezTerm for the pane)"))
+                 else "not in tmux — the frog lives in a tmux pane, so "
+                      "you won't see him (add tmux + WezTerm)"))
 
     crit_ok = all(ok for _, ok, critical, _ in rows if critical)
 
@@ -1795,10 +1777,10 @@ def mode_resolve_theme(argv):
 
 
 def _parse(argv):
-    mode = argv[0] if argv else "statusline"
+    mode = argv[0] if argv else "tap"
     opts = {"session": None, "layout": None, "theme": None, "always": False,
-            "party": False, "which": "frog", "event": None,
-            "settings": None, "statusline_mode": "statusline", "rc": None,
+            "party": False, "event": None,
+            "settings": None, "statusline_mode": "tap", "rc": None,
             "minimal": False, "since": None}
     i = 1
     while i < len(argv):
@@ -1811,8 +1793,6 @@ def _parse(argv):
             i += 1; opts["theme"] = argv[i]
         elif a == "--event":
             i += 1; opts["event"] = argv[i]
-        elif a == "--which":
-            i += 1; opts["which"] = argv[i]
         elif a == "--settings":
             i += 1; opts["settings"] = argv[i]
         elif a == "--statusline-mode":
@@ -1840,9 +1820,9 @@ def _parse(argv):
         opts["layout"] = os.environ.get("CLAUDE_FROG_LAYOUT") or DEFAULT_LAYOUT
     if opts["layout"] not in LAYOUTS:
         opts["layout"] = DEFAULT_LAYOUT
-    # env lets the SessionStart hook, the statusline, and the tmux toggle
-    # keybind agree on a theme without threading --theme through each. Accept
-    # friendly aliases ("SEGA", "Game Boy") from either source.
+    # env lets the SessionStart hook and the tmux toggle keybind agree on a
+    # theme without threading --theme through each. Accept friendly aliases
+    # ("SEGA", "Game Boy") from either source.
     raw_theme = opts["theme"] or os.environ.get("CLAUDE_FROG_THEME")
     opts["theme"] = resolve_theme(raw_theme) or DEFAULT_THEME
     return mode, opts
@@ -1855,9 +1835,9 @@ def main():
             if not opts["session"]:
                 opts["session"] = "default"
             mode_dance(opts)
-        elif mode == "statusline":
-            mode_statusline(opts)
-        elif mode == "tap":
+        elif mode in ("tap", "statusline"):
+            # "statusline" (the retired in-bar mood frog) is a deprecated
+            # alias: existing settings.json wirings keep feeding the gauge.
             mode_tap()
         elif mode == "hook":
             mode_hook(opts)
@@ -1883,7 +1863,7 @@ def main():
     except SystemExit:
         raise
     except Exception:
-        # never crash the statusline / hook paths
+        # never crash the tap / hook paths ("statusline" is the tap alias)
         if mode in ("statusline", "tap", "hook"):
             sys.exit(0)
         raise

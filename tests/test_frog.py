@@ -26,15 +26,13 @@ import claude_frog as cf  # noqa: E402
 
 class TestSprites(unittest.TestCase):
     def test_sprites_are_rectangular(self):
-        for name, grid in (("FROG", cf.FROG), ("FROG_BACK", cf.FROG_BACK),
-                           ("CHIBI", cf.CHIBI)):
+        for name, grid in (("FROG", cf.FROG), ("FROG_BACK", cf.FROG_BACK)):
             widths = {len(row) for row in grid}
             self.assertEqual(len(widths), 1, f"{name} rows are ragged: {widths}")
 
     def test_expected_dimensions(self):
         # motion/pane sizing assume these; a stray row would drift the floor.
         self.assertEqual((len(cf.FROG), len(cf.FROG[0])), (12, 19))
-        self.assertEqual((len(cf.CHIBI), len(cf.CHIBI[0])), (6, 15))
 
     def test_back_matches_front_dimensions(self):
         # he swaps to the back view mid-move; a size change would make him
@@ -48,7 +46,7 @@ class TestSprites(unittest.TestCase):
         self.assertFalse(used & set("PWNR"), "the back view shows a face")
 
     def test_every_palette_key_resolves(self):
-        used = {ch for grid in (cf.FROG, cf.FROG_BACK, cf.CHIBI)
+        used = {ch for grid in (cf.FROG, cf.FROG_BACK)
                 for row in grid for ch in row}
         missing = used - set(cf.RGB)
         self.assertFalse(missing, f"sprite uses keys absent from RGB: {missing}")
@@ -61,18 +59,15 @@ class TestSprites(unittest.TestCase):
 
 class TestBlink(unittest.TestCase):
     def test_blink_overlays_are_in_bounds(self):
-        for base, overlay in ((cf.FROG, cf._FROG_BLINK),
-                              (cf.CHIBI, cf._CHIBI_BLINK)):
-            h, w = len(base), len(base[0])
-            for y, line in overlay.items():
-                self.assertTrue(0 <= y < h, f"blink row {y} out of range")
-                self.assertLessEqual(len(line), w, f"blink row {y} too wide")
+        base, overlay = cf.FROG, cf._FROG_BLINK
+        h, w = len(base), len(base[0])
+        for y, line in overlay.items():
+            self.assertTrue(0 <= y < h, f"blink row {y} out of range")
+            self.assertLessEqual(len(line), w, f"blink row {y} too wide")
 
     def test_blink_frames_render(self):
-        for base, overlay in ((cf.FROG, cf._FROG_BLINK),
-                              (cf.CHIBI, cf._CHIBI_BLINK)):
-            px = cf.pose(base, overlay, {"blink": True})
-            self.assertTrue(cf.render_pixels(px))
+        px = cf.pose(cf.FROG, cf._FROG_BLINK, {"blink": True})
+        self.assertTrue(cf.render_pixels(px))
 
 
 class TestRenderPipeline(unittest.TestCase):
@@ -108,9 +103,9 @@ class TestTwerk(unittest.TestCase):
         self.assertNotEqual(front, turned)
 
     def test_caller_without_a_back_view_keeps_facing_front(self):
-        # the statusline chibi has no back sprite; `back` must be a no-op there.
-        self.assertEqual(cf.pose(cf.CHIBI, cf._CHIBI_BLINK, {"back": True}),
-                         cf.pose(cf.CHIBI, cf._CHIBI_BLINK, {}))
+        # a caller that passes no back sprite must get a no-op `back` param.
+        self.assertEqual(cf.pose(cf.FROG, cf._FROG_BLINK, {"back": True}),
+                         cf.pose(cf.FROG, cf._FROG_BLINK, {}))
 
     def test_hip_shift_moves_only_the_rump(self):
         px = cf._colorize(cf.FROG_BACK)
@@ -165,7 +160,7 @@ class TestTwerk(unittest.TestCase):
 class TestThemes(unittest.TestCase):
     def test_every_theme_resolves_all_sprite_keys(self):
         # a theme missing a key would paint a transparent hole in the frog.
-        keys = {ch for grid in (cf.FROG, cf.FROG_BACK, cf.CHIBI)
+        keys = {ch for grid in (cf.FROG, cf.FROG_BACK)
                 for row in grid for ch in row}
         for name, spec in cf.THEMES.items():
             for k in keys:
@@ -287,9 +282,8 @@ class TestCliModesExitZero(unittest.TestCase):
         )
 
     def test_preview(self):
-        for which in ("frog", "chibi"):
-            r = self._run(["preview", "--which", which])
-            self.assertEqual(r.returncode, 0, r.stderr)
+        r = self._run(["preview"])
+        self.assertEqual(r.returncode, 0, r.stderr)
 
     def test_preview_every_theme(self):
         for theme in cf.THEMES:
@@ -297,12 +291,15 @@ class TestCliModesExitZero(unittest.TestCase):
             self.assertEqual(r.returncode, 0, r.stderr)
             self.assertIn(theme, r.stdout)
 
-    def test_statusline_survives_each_theme(self):
+    def test_deprecated_statusline_alias_taps_silently(self):
+        # `statusline` (the retired in-bar frog) must behave exactly like tap:
+        # exit 0, draw nothing, and still publish the token gauge.
         p = json.dumps({"session_id": "t",
                         "context_window": {"used_percentage": 62}})
-        for theme in cf.THEMES:
-            r = self._run(["statusline", "--theme", theme], stdin=p)
-            self.assertEqual(r.returncode, 0, f"{theme}: {r.stderr}")
+        for mode in ("statusline", "tap"):
+            r = self._run([mode], stdin=p)
+            self.assertEqual(r.returncode, 0, f"{mode}: {r.stderr}")
+            self.assertEqual(r.stdout, "", f"{mode} drew in the status bar")
 
     def test_resolve_theme_mode_prints_canon_and_exit_code(self):
         # the shell launcher keys off both stdout and the exit code.
@@ -359,14 +356,26 @@ class TestInstallSettings(unittest.TestCase):
     def _load(self, p):
         return json.loads(self._read(p))
 
-    def test_fresh_adds_statusline_and_all_hooks(self):
+    def test_fresh_adds_tap_statusline_and_all_hooks(self):
         p = self._tmp()
         r = self._run(p)
         self.assertEqual(r.returncode, 0, r.stderr)
         data = self._load(p)
         self.assertIn("claude_frog.py", data["statusLine"]["command"])
+        # the statusLine must be the silent tap, never the retired in-bar frog
+        self.assertTrue(data["statusLine"]["command"].endswith(" tap"),
+                        data["statusLine"]["command"])
         for ev in cf.FROG_HOOK_EVENTS:
             self.assertTrue(cf._event_has_frog_hook(data["hooks"][ev]), ev)
+
+    def test_migrates_deprecated_statusline_mode_to_tap(self):
+        p = self._tmp(json.dumps({"statusLine": {
+            "type": "command",
+            "command": "python3 /old/claude_frog.py statusline"}}))
+        r = self._run(p)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        cmd = self._load(p)["statusLine"]["command"]
+        self.assertTrue(cmd.endswith(" tap"), cmd)
 
     def test_idempotent(self):
         p = self._tmp()
@@ -489,6 +498,25 @@ class TestDoctor(unittest.TestCase):
             f.write(f"# {cf.MARKER}\nsource whatever\n")
         r = self._run(os.path.join(d, "settings.json"), rc, extra=("--minimal",))
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_foreign_statusline_warns_but_does_not_fail(self):
+        # a user-owned statusLine may well tap the frog itself (we can't tell),
+        # so it must not fail the checkup — just warn.
+        d = self._tmp_dir()
+        settings = os.path.join(d, "settings.json")
+        subprocess.run([sys.executable, SCRIPT, "install-settings",
+                        "--settings", settings], capture_output=True, timeout=15)
+        with open(settings) as f:
+            data = json.load(f)
+        data["statusLine"] = {"type": "command", "command": "/usr/local/bin/my-bar"}
+        with open(settings, "w") as f:
+            json.dump(data, f)
+        rc = os.path.join(d, "rc")
+        with open(rc, "w") as f:
+            f.write(f"# {cf.MARKER}\nsource whatever\n")
+        r = self._run(settings, rc)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("your own statusLine", r.stdout)
 
 
 class TestEnvironment(unittest.TestCase):

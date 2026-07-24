@@ -1,1 +1,1 @@
-../standards/STANDARDS.base.md
+../platform/standards/STANDARDS.base.md

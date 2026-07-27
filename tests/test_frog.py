@@ -398,13 +398,15 @@ class _FakeTmux(object):
     def __init__(self):
         self.panes = {}          # pane_id -> window_id
         self.opts = {}           # pane_id -> {option: value}
+        self.cmds = {}           # pane_id -> pane_start_command
         self.spawned = []        # the commands split-window was asked to run
         self._next = 100
 
-    def add_pane(self, win):
+    def add_pane(self, win, cmd=""):
         pid = "%%%d" % self._next
         self._next += 1
         self.panes[pid] = win
+        self.cmds[pid] = cmd
         return pid
 
     def _arg(self, args, flag):
@@ -415,11 +417,15 @@ class _FakeTmux(object):
         cmd = args[0] if args else ""
         if cmd == "list-panes":
             fmt = self._arg(args, "-F") or "#{pane_id}"
+            target = self._arg(args, "-t")   # None or "-a" => every pane
             lines = []
-            for pid in self.panes:
+            for pid, win in self.panes.items():
+                if target and target != win:
+                    continue
                 line = fmt.replace("#{pane_id}", pid)
                 line = line.replace(
                     "#{@claude_frog}", self.opts.get(pid, {}).get("@claude_frog", ""))
+                line = line.replace("#{pane_start_command}", self.cmds.get(pid, ""))
                 lines.append(line)
             return self._R("\n".join(lines))
         if cmd == "display-message":
@@ -580,6 +586,42 @@ class TestWindowSingleton(_WindowCase):
         cf._win_claim("session-a")
         self.assertIn("--window @1", self.tmux.spawned[0])
         self.assertNotIn("--session", self.tmux.spawned[0])
+
+    # -- upgrading from the per-session era -------------------------------- #
+
+    _LEGACY = ('exec python3 /path/claude_frog.py dance '
+               '--session abc --theme snes --since 0')
+
+    def test_a_legacy_frog_is_reaped_rather_than_stacked_on(self):
+        # Frogs spawned before window scoping run `dance --session` and carry no
+        # @claude_frog tag, so the window bookkeeping is blind to them. Upgrading
+        # mid-session must not leave one standing next to the new frog — that's
+        # two frogs in a window, exactly when someone first tests the fix.
+        legacy = self.tmux.add_pane("@1", self._LEGACY)
+        cf._win_claim("session-a")
+        self.assertNotIn(legacy, self.tmux.panes, "the old frog survived the upgrade")
+        self.assertEqual(len(self._frogs()), 1)
+
+    def test_reaping_leaves_other_windows_and_ordinary_panes_alone(self):
+        legacy_here = self.tmux.add_pane("@1", self._LEGACY)
+        legacy_there = self.tmux.add_pane("@2", self._LEGACY)
+        shell = self.tmux.add_pane("@1", "zsh")
+        cf._win_claim("session-a")
+        self.assertNotIn(legacy_here, self.tmux.panes)
+        self.assertIn(legacy_there, self.tmux.panes, "reaped another window's frog")
+        self.assertIn(shell, self.tmux.panes, "reaped a plain shell pane")
+
+    def test_toggle_hides_a_legacy_frog_rather_than_replacing_it(self):
+        # prefix+F on an un-upgraded window means "hide the frog I can see".
+        # Reaping it and spawning a replacement would make the key look dead.
+        legacy = self.tmux.add_pane("@1", self._LEGACY)
+        with self.assertRaises(SystemExit):
+            cf.mode_toggle({})
+        self.assertNotIn(legacy, self.tmux.panes, "toggle didn't hide the old frog")
+        self.assertEqual(len(self._frogs()), 0, "toggle spawned a frog while hiding")
+        with self.assertRaises(SystemExit):       # and F again brings him back
+            cf.mode_toggle({})
+        self.assertEqual(len(self._frogs()), 1)
 
     def test_window_ids_are_validated_before_reaching_a_command_line(self):
         for bad in ("", None, "@", "1", "@1; rm -rf ~", "@1 x", "../@1"):

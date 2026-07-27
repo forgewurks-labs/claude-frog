@@ -383,6 +383,128 @@ class TestPruneStale(unittest.TestCase):
         self.assertFalse(os.path.exists(stale), "sweep stopped at the bad file")
 
 
+class TestStatusBarFrog(unittest.TestCase):
+    """The one-line status-bar frog: opt-in, single line, never fatal."""
+
+    def setUp(self):
+        import shutil
+        self.home = tempfile.mkdtemp(prefix="frog-slhome-")
+        self.addCleanup(shutil.rmtree, self.home, True)
+        self.env = {**ENV, "XDG_CONFIG_HOME": self.home}
+        for s in cf.SETTINGS.values():
+            self.env.pop(s["env"], None)
+        self.payload = json.dumps({
+            "session_id": "sl-test",
+            "context_window": {"used_percentage": 39,
+                               "context_window_size": 200000}})
+
+    def _run(self, mode="statusline", stdin=None, env=None):
+        return subprocess.run([sys.executable, SCRIPT, mode],
+                              input=self.payload if stdin is None else stdin,
+                              capture_output=True, text=True, timeout=15,
+                              env=env or self.env)
+
+    def _on(self):
+        subprocess.run([sys.executable, SCRIPT, "config", "statusline", "frog"],
+                       capture_output=True, text=True, env=self.env, timeout=15)
+
+    # -- opt-in ------------------------------------------------------------ #
+
+    def test_silent_until_you_ask_for_it(self):
+        # An upgrade must never start drawing in somebody's status bar.
+        for mode in ("tap", "statusline"):
+            r = self._run(mode)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertEqual(r.stdout, "", f"{mode} drew without being asked")
+
+    def test_draws_once_enabled_under_either_mode_name(self):
+        self._on()
+        for mode in ("tap", "statusline"):
+            r = self._run(mode)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertTrue(r.stdout.strip(), f"{mode} drew nothing")
+
+    def test_the_gauge_is_still_fed_when_the_bar_is_silent(self):
+        # The pane's shake and pink fade depend on this even with nothing drawn.
+        cache = os.path.join(ENV["XDG_CACHE_HOME"], "claude-frog", "sl-test.ctx")
+        self._run("tap")
+        self.assertTrue(os.path.exists(cache), "tap stopped publishing the gauge")
+
+    # -- shape ------------------------------------------------------------- #
+
+    def test_it_really_is_one_line(self):
+        # The whole point of a 2px sprite: one character row, so he costs
+        # nothing vertically in a status bar.
+        self._on()
+        out = self._run().stdout
+        self.assertEqual(out.count("\n"), 0, "the status bar frog wrapped a line")
+
+    def test_the_micro_sprite_is_two_pixels_tall(self):
+        self.assertEqual(len(cf.MICRO), 2)
+        self.assertEqual(len(cf.render_pixels(cf._colorize(cf.MICRO))), 1)
+
+    def test_it_reports_tokens_and_percent(self):
+        self._on()
+        out = self._run().stdout
+        self.assertIn("78k", out)
+        self.assertIn("39%", out)
+
+    def test_percent_is_omitted_when_the_window_size_is_unknown(self):
+        self._on()
+        out = self._run(stdin=json.dumps(
+            {"session_id": "t", "context_window": {"total_input_tokens": 5000}})).stdout
+        self.assertIn("5.0k", out)
+        self.assertNotIn("%", out)
+
+    def test_the_bar_tracks_window_fill_not_the_mood_ramp(self):
+        # Length = how full the window is; colour = how cooked Claude is. On a
+        # 1M window, 200k tokens is a fifth full even though he's fully pink.
+        wide = cf._gauge_bar(200_000, 1_000_000, "snes")
+        narrow = cf._gauge_bar(200_000, 200_000, "snes")
+        self.assertEqual(wide.count("▓"), 2, "bar ignored the real window size")
+        self.assertEqual(narrow.count("▓"), 8)
+
+    def test_every_theme_renders(self):
+        for theme in cf.THEMES:
+            line = cf._statusline_text("t", 78_000, 200_000, theme)
+            self.assertTrue(line.strip())
+            self.assertNotIn("\n", line)
+
+    # -- never fatal ------------------------------------------------------- #
+
+    def test_survives_junk_with_the_bar_enabled(self):
+        self._on()
+        for p in ("", "not json", "{}", "[]", '{"context_window": "nope"}'):
+            r = self._run(stdin=p)
+            self.assertEqual(r.returncode, 0, f"statusline <- {p!r}: {r.stderr}")
+
+    def test_a_broken_render_does_not_break_the_prompt(self):
+        # The bar is drawn inside the tap path, which must always exit 0.
+        # Enable via the env var, not the config file: this call runs in-process
+        # and would otherwise read the developer's real settings and skip the
+        # render entirely, passing without testing anything.
+        import io
+        saved_micro, saved_stdin = cf.MICRO, sys.stdin
+        saved_stdout = sys.stdout           # keep the bar out of the test log
+        prev = os.environ.get("CLAUDE_FROG_STATUSLINE")
+        os.environ["CLAUDE_FROG_STATUSLINE"] = "frog"
+        try:
+            self.assertEqual(cf._setting("statusline")[0], "frog",
+                             "guard: the render path wasn't actually enabled")
+            cf.MICRO = "not a sprite"
+            sys.stdin, sys.stdout = io.StringIO(self.payload), io.StringIO()
+            with self.assertRaises(SystemExit) as e:
+                cf.mode_tap()
+            self.assertEqual(e.exception.code, 0)
+        finally:
+            cf.MICRO, sys.stdin = saved_micro, saved_stdin
+            sys.stdout = saved_stdout
+            if prev is None:
+                os.environ.pop("CLAUDE_FROG_STATUSLINE", None)
+            else:
+                os.environ["CLAUDE_FROG_STATUSLINE"] = prev
+
+
 class TestSettingsResolution(unittest.TestCase):
     """Settings resolve flag > env > config file > default, and say which.
 

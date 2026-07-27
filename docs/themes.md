@@ -13,8 +13,9 @@ rely on it — the code is the source of truth.
   `Choreographer` that picks moves and emits per-frame pose params. The sprite
   is `FROG` (plus its turned-around twin `FROG_BACK`); its dimensions are
   asserted in the tests — 12 rows × 19 cols — because motion and pane sizing
-  assume them. (`CHIBI`, the compact statusline frog, was retired along with
-  the in-bar statusline mode.)
+  assume them. `MICRO` is the status-bar frog: 2 rows × 11 cols, and the height
+  is load-bearing — 2px is exactly *one* character row through the half-block
+  renderer, which is what lets him live in a status bar at all.
 - **Look = palette.** A sprite is a grid of single-char *palette keys* (`O`
   outline, `H` highlight, `B` body midtone, `P` eyes, …). Colorizing maps each
   key to an `(r, g, b)` or `None` (transparent) via a palette dict. So the whole
@@ -139,12 +140,13 @@ by calling the **`install-settings` CLI mode**, which merges into
 `~/.claude/settings.json` (path overridable with `--settings`, or the
 `CLAUDE_CONFIG_DIR` env var):
 
-- Adds a `statusLine` running `… tap` (the silent token feed) — but only if you
-  don't already have one; an existing non-frog statusLine is never clobbered
-  (Claude Code allows just one), and you're pointed at `statusline-compose.sh`.
-  A frog statusLine still on the deprecated `statusline` mode is migrated to
-  `tap` (the in-bar mood frog is retired; the CLI mode survives purely as a
-  tap alias so old wirings keep feeding the gauge).
+- Adds a `statusLine` running `… tap` (the token feed) — but only if you don't
+  already have one; an existing non-frog statusLine is never clobbered (Claude
+  Code allows just one), and you're pointed at `statusline-compose.sh`. `tap`
+  and `statusline` are the *same mode*: whether anything is drawn in the bar is
+  the `statusline` **setting** (`off` | `frog`), never the command name, so an
+  existing wiring of either keeps working and an upgrade can't start drawing in
+  somebody's bar unasked.
 - Appends a frog hook group to each of `FROG_HOOK_EVENTS` (`SessionStart`,
   `UserPromptSubmit`, `Stop`, `SessionEnd`), skipping any event that already has
   one.
@@ -168,8 +170,8 @@ python3 assets/gen_screenshots.py
 ## Hard rules
 
 - The **tap / hook paths never crash and always exit 0** (including the
-  deprecated `statusline` alias) — a broken frog must never break your prompt.
-  New color/animation work must preserve this.
+  `statusline` alias, and the status-bar render inside it) — a broken frog must
+  never break your prompt. New color/animation work must preserve this.
 - **Standard library only** — no third-party deps, anywhere (including the
   screenshot generator).
 - Tests live in `tests/test_frog.py` (`python3 -m unittest discover -s tests`);

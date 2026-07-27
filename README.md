@@ -69,6 +69,31 @@ Everything that isn't a theme name passes straight through, so `claude`,
 `claude -r`, and `claude "fix the bug"` behave exactly as before. That's the
 whole loop: **install → new terminal → `claude SEGA`.**
 
+### Change how he looks (no dotfile editing)
+
+The installer asks you once. After that, everything is one command:
+
+```sh
+python3 ~/.claude-frog/claude_frog.py config                  # what he's using, and WHY
+python3 ~/.claude-frog/claude_frog.py config theme snes       # change it
+python3 ~/.claude-frog/claude_frog.py config statusline frog  # a frog in your status bar too
+python3 ~/.claude-frog/claude_frog.py setup                   # run the wizard again
+```
+
+`config` on its own prints the source of every value, which matters more than it
+sounds:
+
+```
+  theme   terraria  from $CLAUDE_FROG_THEME
+  layout  bottom    from ~/.config/claude-frog/config.json
+  flora   on        default
+```
+
+Settings resolve **flag → `CLAUDE_FROG_*` env → config file → built-in default**.
+So `claude SEGA` still overrides a single session, and an `export` line left in
+a shell rc still wins — but now you can *see* that it does, instead of wondering
+why your frog won't change colour.
+
 ### Verify / troubleshoot
 
 The installer ends by running a **checkup** so you know it worked before you open
@@ -104,13 +129,8 @@ re-wires idempotently), or `git -C ~/.claude-frog pull`. **Remove** it completel
 
 Everything comes from **one file, standard library only** — no `pip install`,
 no dependencies. Two pieces work together: the **dancing pane** (where the frog
-lives) and a silent **token feed** in your statusLine (how he knows how deep in
-context you are).
-
-> **Deprecated:** the old *statusline frog* — a compact mood frog drawn in the
-> status bar itself — has been retired. The `statusline` CLI mode still exists
-> as an alias of `tap`, so old wirings keep feeding the gauge; they just no
-> longer draw in the bar.
+lives) and the **statusLine tap** (how he knows how deep in context you are —
+and, if you want, a one-line frog of his own).
 
 ### 🕺 Dancing pane frog (tmux + WezTerm)
 
@@ -160,16 +180,15 @@ animates in (flowers and trees grow up, rocks drop and settle, logs roll in,
 clouds drift across the sky) and then stays. It's a quiet, honest tally of how
 long you've been at it: a bare patch of grass at the start, a whole scene by the
 end of a long session. Props live only in the pane, so the diorama resets when a
-new session starts. It's on by default — set `CLAUDE_FROG_FLORA=0` to turn it
-off, or tune `ENTRANCE_FRAMES` / `FLORA_MAX` at the top of `claude_frog.py`.
+new session starts. It's on by default — `config flora off` to turn it off, or
+tune `ENTRANCE_FRAMES` / `FLORA_MAX` at the top of `claude_frog.py`.
 
 ### 🤫 The token feed (`tap`)
 
 Only the statusLine is handed your token usage — the hooks are blind to it. So
-the frog "borrows" that surface without occupying it: `tap` reads the payload,
-publishes the token gauge for the pane, and prints **nothing**. Skip it and he
-falls back to guessing goofiness from turn count — and you lose the shake and
-the pink fade entirely.
+the frog "borrows" that surface: `tap` reads the payload and publishes the token
+gauge for the pane. Skip it and he falls back to guessing goofiness from turn
+count — and you lose the shake and the pink fade entirely.
 
 The installer wires it for you; by hand it's one line in
 `~/.claude/settings.json`:
@@ -183,9 +202,40 @@ The installer wires it for you; by hand it's one line in
 }
 ```
 
+By default it prints **nothing** — your status bar stays yours. Unless you ask
+for the status-bar frog:
+
+### 🐸 The status-bar frog (one line)
+
+```sh
+python3 claude_frog.py config statusline frog     # off by default
+```
+
+He shows up as a single character row — a 2px frog, which is exactly one line
+through the half-block renderer, so he costs you nothing vertically:
+
+```
+🐸 ▓▓▓▓▓░░░  78k · 39%
+```
+
+Two channels, deliberately:
+
+- the bar's **length** is how full your *context window* is, and
+- the bar's **colour** (and the frog's) is how *cooked* Claude is — the same
+  absolute-token green→pink fade the pane frog wears.
+
+A 1M window sitting at 200k reads "a fifth full, and he's gone pink," which is
+the honest summary; one number couldn't say it. He wears your theme, blinks
+occasionally, and gets the shakes past ~150k like his big brother.
+
+Turning it on doesn't change *which* command you wire — `tap` and `statusline`
+behave identically, and neither draws anything until you opt in. So an existing
+wiring of either keeps working, and an upgrade never starts scribbling in
+somebody's status bar unasked.
+
 Already have a statusline of your own? Keep it — point `statusLine` at
-[`install/statusline-compose.sh`](install/statusline-compose.sh) instead, which
-taps the frog first and then renders your bar exactly as before.
+[`install/statusline-compose.sh`](install/statusline-compose.sh), which taps the
+frog and then renders your bar on the same line.
 
 ---
 
@@ -272,6 +322,13 @@ if you'd rather not add a wrapper, set it yourself before starting Claude Code:
 export CLAUDE_FROG_THEME=genesis   # or: gba, snes, terraria
 ```
 
+For a **permanent** choice, don't use an `export` — that pins every session and
+is easy to forget you did. Save it instead:
+
+```sh
+python3 claude_frog.py config theme genesis
+```
+
 Either way, the dancing pane reads it (the theme is baked in at spawn, so it
 stays fixed for that session). You can also pass `--theme` directly to any
 invocation. Preview them without installing anything:
@@ -293,7 +350,7 @@ The pane is spawned by the `SessionStart` hook but toggled by the tmux keybind,
 so rather than passing `--layout` to both, set it once:
 
 ```sh
-export CLAUDE_FROG_LAYOUT=bottom
+python3 claude_frog.py config layout bottom
 ```
 
 ---
@@ -338,5 +395,6 @@ python3 claude_frog.py dance --party      # watch him lose it (Ctrl-C to stop)
 
 Only one `statusLine` command is allowed, so if you already run one, wrap both.
 See [`install/statusline-compose.sh`](install/statusline-compose.sh) for a small
-wrapper that feeds the frog's token gauge (silently) and then renders your bar
-exactly as before.
+wrapper that taps the frog and then renders your bar on the same line. With the
+status-bar frog off (the default) it's invisible; with it on you get
+`🐸 ▓▓▓▓▓░░░ 78k · 39%  <your bar>`.

@@ -1498,6 +1498,31 @@ def _prune_claims(state, live):
     return state
 
 
+def _reap_legacy_panes(win):
+    """Kill any pre-window-scoping frog still dancing in `win`.
+
+    Frogs used to be spawned per session (`dance --session`) and carry no
+    `@claude_frog` tag, so the window bookkeeping is blind to them. Upgrading
+    mid-session would otherwise leave one of those standing next to the new
+    window-scoped frog — two frogs in one window, which is the exact thing this
+    is all meant to prevent, showing up precisely when someone first tests the
+    fix. They answer to a session that no longer drives them, so there is
+    nothing to preserve: kill them and let the window spawn its one frog.
+    """
+    r = _tmux("list-panes", "-t", win, "-F",
+              "#{pane_id}\t#{@claude_frog}\t#{pane_start_command}")
+    killed = []
+    for line in (r.stdout or "").splitlines() if r else []:
+        parts = line.split("\t")
+        if len(parts) != 3:
+            continue
+        pid, tag, cmd = parts
+        if not tag.strip() and "claude_frog.py" in cmd and " dance" in cmd:
+            _tmux("kill-pane", "-t", pid)
+            killed.append(pid)
+    return killed
+
+
 def _spawn_win_pane(win, near, session, layout=DEFAULT_LAYOUT,
                     theme=DEFAULT_THEME):
     """Split a frog pane into `win` and return its pane id (None if it failed).
@@ -1554,6 +1579,7 @@ def _win_claim(session, layout=DEFAULT_LAYOUT, theme=DEFAULT_THEME):
         live = _live_panes()
         st = _prune_claims(_read_win(win), live)
         if st.get("pane") not in live:
+            _reap_legacy_panes(win)   # upgrade path: never stack on an old frog
             st["pane"] = _spawn_win_pane(win, mine, session, layout, theme)
             st["theme"], st["layout"] = theme, layout
         st["sessions"][sid] = {"ts": time.time(), "pane": mine}
@@ -1762,6 +1788,12 @@ def mode_toggle(opts):
         st = _prune_claims(_read_win(win), live)
         if st.get("pane") in live:
             _kill_win_pane(st)
+            _reap_legacy_panes(win)  # hiding must hide every frog in the window
+            st["pane"] = None
+        elif _reap_legacy_panes(win):
+            # Nothing tracked, but a pre-upgrade frog was on screen. The keypress
+            # means "hide the frog I can see" — reaping it IS the hide. Spawning
+            # a replacement here would make F look like it did nothing.
             st["pane"] = None
         else:
             session = st.get("active") or _newest_claim(st["sessions"]) or "default"

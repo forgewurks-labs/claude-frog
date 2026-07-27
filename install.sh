@@ -9,9 +9,10 @@
 # It shows you exactly what it will touch and asks once before editing.
 #
 # Usage:
-#     ./install.sh                 # the full frog (launcher + tap + hooks)
+#     ./install.sh                 # the full frog (launcher + tap + hooks + keybind)
 #     ./install.sh --minimal       # ONLY the `claude <THEME>` launcher, no settings edits
 #     ./install.sh --yes           # don't prompt — assume yes (for automation)
+#     ./install.sh --no-wizard     # skip the pick-your-frog questions
 #     ./install.sh --uninstall     # remove everything this installer added
 #     ./install.sh ~/.bashrc       # force which rc file to write
 set -euo pipefail
@@ -24,16 +25,18 @@ MARKER="claude-frog theme launcher"   # keep in sync with MARKER in claude_frog.
 MINIMAL=0
 ASSUME_YES=0
 UNINSTALL=0
+NO_WIZARD=0
 RC=""
 for a in "$@"; do
   case "$a" in
     --minimal)      MINIMAL=1 ;;
     --tap)          : ;;   # back-compat no-op: tap is now the only statusLine mode
-    --yes|-y)       ASSUME_YES=1 ;;
+    --yes|-y)       ASSUME_YES=1; NO_WIZARD=1 ;;   # automation can't answer questions
+    --no-wizard)    NO_WIZARD=1 ;;
     --uninstall)    UNINSTALL=1 ;;
     --with-frog)    : ;;   # back-compat no-op: the full frog is now the default
     -h|--help)
-      sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+      sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     -*) echo "unknown option: $a  (try --help)" >&2; exit 2 ;;
     *)  RC="$a" ;;
   esac
@@ -89,6 +92,16 @@ if [ "$UNINSTALL" = 1 ]; then
   fi
   # 2. the settings.json wiring.
   python3 "$FROG" uninstall-settings
+  # 3. the tmux keybind.
+  python3 "$FROG" uninstall-keybind
+  # 4. your saved settings (theme/layout/flora).
+  CFG="$(python3 "$FROG" config-path 2>/dev/null || true)"
+  if [ -n "$CFG" ] && [ -f "$CFG" ]; then
+    rm -f "$CFG"
+    echo "   - settings removed ($CFG)"
+  else
+    echo "   • no settings file to remove"
+  fi
   echo
   echo "Done. The files above are the only things Claude Frog ever touched."
   echo "Open a new terminal for the shell change to take effect."
@@ -101,11 +114,15 @@ fi
 SETTINGS="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json"
 in_tmux=0; [ -n "${TMUX:-}" ] && in_tmux=1
 
+TMUX_CONF="$(python3 "$FROG" tmux-conf-path 2>/dev/null || echo "$HOME/.tmux.conf")"
+
 echo "🐸 Claude Frog will:"
 echo "   • add the launcher line to  $RC        (so \`claude SEGA\` works)"
 if [ "$MINIMAL" != 1 ]; then
   echo "   • wire the token feed (a silent statusLine tap) + dance hooks into  $SETTINGS"
   echo "     (preserves everything already there; backs it up first)"
+  echo "   • add the  prefix + F  toggle keybind to  $TMUX_CONF"
+  [ "$NO_WIZARD" != 1 ] && echo "   • ask you a couple of questions to pick your frog's look"
   if [ "$in_tmux" = 1 ]; then
     echo "   • you're in tmux → you get the dancing pane frog 🕺"
   else
@@ -120,6 +137,7 @@ echo
 # We track what ACTUALLY changed so the receipt reports the truth on a re-run.
 LAUNCHER_CHANGED=0
 SETTINGS_CHANGED=0
+KEYBIND_CHANGED=0
 
 # --- 1. the launcher -------------------------------------------------------- #
 if [ -f "$RC" ] && grep -qF "$MARKER" "$RC"; then
@@ -141,6 +159,18 @@ if [ "$MINIMAL" != 1 ]; then
   out="$(python3 "$FROG" install-settings)"
   printf '%s\n' "$out"
   case "$out" in *"Wired the frog"*) SETTINGS_CHANGED=1 ;; esac
+
+  # --- 2b. the tmux toggle keybind --------------------------------------- #
+  # This used to be a snippet you were told to hand-paste with the path swapped
+  # in yourself, so in practice almost nobody had the keybind we advertised.
+  kb="$(python3 "$FROG" install-keybind)"
+  printf '%s\n' "$kb"
+  case "$kb" in *"added to"*) KEYBIND_CHANGED=1 ;; esac
+fi
+
+# --- 2c. pick your frog ----------------------------------------------------- #
+if [ "$MINIMAL" != 1 ] && [ "$NO_WIZARD" != 1 ]; then
+  python3 "$FROG" setup || true
 fi
 
 # --- 3. prove it worked ----------------------------------------------------- #
@@ -152,7 +182,7 @@ python3 "$FROG" "${DOCTOR_ARGS[@]}" || true
 # --- 4. the receipt + the one unavoidable step ------------------------------ #
 echo
 echo "────────────────────────────────────────────────────────────"
-if [ "$LAUNCHER_CHANGED" = 1 ] || [ "$SETTINGS_CHANGED" = 1 ]; then
+if [ "$LAUNCHER_CHANGED" = 1 ] || [ "$SETTINGS_CHANGED" = 1 ] || [ "$KEYBIND_CHANGED" = 1 ]; then
   echo "What I changed:"
   [ "$LAUNCHER_CHANGED" = 1 ] && \
     echo "   • $RC — added the launcher (look for the '$MARKER' comment)"
@@ -160,6 +190,8 @@ if [ "$LAUNCHER_CHANGED" = 1 ] || [ "$SETTINGS_CHANGED" = 1 ]; then
     echo "   • $SETTINGS — added the token feed (tap) + hooks"
     echo "     (your previous file is saved at $SETTINGS.bak)"
   fi
+  [ "$KEYBIND_CHANGED" = 1 ] && \
+    echo "   • $TMUX_CONF — added the prefix + F toggle keybind"
 else
   echo "What I changed:  nothing — you were already set up (idempotent re-run)."
 fi
@@ -169,5 +201,10 @@ echo
 echo "🐸 One last step (a shell can't reach into this terminal for you):"
 echo "      close this terminal and open a new one"
 echo "      — or run:  source \"$RC\""
-echo "   then start a session with a theme:"
-echo "      claude SEGA        # or SNES, GBA — name none and he wears SNES"
+echo "   then start a session:"
+echo "      claude             # he wears whatever you picked"
+echo "      claude SEGA        # or override the look for one session"
+echo
+echo "   Change your mind later — no dotfile editing:"
+echo "      python3 $FROG config              # what he's using, and why"
+echo "      python3 $FROG config theme snes   # change it"

@@ -383,6 +383,203 @@ class TestPruneStale(unittest.TestCase):
         self.assertFalse(os.path.exists(stale), "sweep stopped at the bad file")
 
 
+class TestSettingsResolution(unittest.TestCase):
+    """Settings resolve flag > env > config file > default, and say which.
+
+    The bug behind all of this: every knob was an env var, so the only durable
+    way to change one was editing a shell rc — and an `export CLAUDE_FROG_THEME=`
+    left in there silently outranked everything with no way to see it.
+    """
+
+    def setUp(self):
+        import shutil
+        self._old = cf.CONFIG_DIR
+        cf.CONFIG_DIR = tempfile.mkdtemp(prefix="frog-cfg-")
+        self.addCleanup(setattr, cf, "CONFIG_DIR", self._old)
+        self.addCleanup(shutil.rmtree, cf.CONFIG_DIR, True)
+        self._saved = {s["env"]: os.environ.get(s["env"])
+                       for s in cf.SETTINGS.values()}
+        self.addCleanup(self._restore)
+        for name in self._saved:
+            os.environ.pop(name, None)
+
+    def _restore(self):
+        for k, v in self._saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    def test_default_when_nothing_is_set(self):
+        self.assertEqual(cf._setting("theme"), (cf.DEFAULT_THEME, "default"))
+        self.assertEqual(cf._setting("layout"), (cf.DEFAULT_LAYOUT, "default"))
+        self.assertEqual(cf._setting("flora"), (True, "default"))
+
+    def test_config_file_beats_default(self):
+        cf._write_config({"theme": "gba"})
+        self.assertEqual(cf._setting("theme"), ("gba", "config"))
+
+    def test_env_beats_config_file(self):
+        cf._write_config({"theme": "gba"})
+        os.environ["CLAUDE_FROG_THEME"] = "terraria"
+        self.assertEqual(cf._setting("theme"), ("terraria", "env"))
+
+    def test_flag_beats_everything(self):
+        cf._write_config({"theme": "gba"})
+        os.environ["CLAUDE_FROG_THEME"] = "terraria"
+        self.assertEqual(cf._setting("theme", "genesis"), ("genesis", "flag"))
+
+    def test_friendly_spellings_resolve_from_any_layer(self):
+        os.environ["CLAUDE_FROG_THEME"] = "Mega Drive"
+        self.assertEqual(cf._setting("theme")[0], "genesis")
+        os.environ.pop("CLAUDE_FROG_THEME")
+        cf._write_config({"theme": "Game Boy"})
+        self.assertEqual(cf._setting("theme")[0], "gba")
+
+    def test_junk_falls_through_instead_of_winning(self):
+        # A typo in a higher layer must not leave the frog themeless — it should
+        # defer to the next layer down.
+        cf._write_config({"theme": "gba"})
+        os.environ["CLAUDE_FROG_THEME"] = "playstation"
+        self.assertEqual(cf._setting("theme"), ("gba", "config"))
+        os.environ["CLAUDE_FROG_LAYOUT"] = "sideways"
+        self.assertEqual(cf._setting("layout"), (cf.DEFAULT_LAYOUT, "default"))
+
+    def test_flora_off_is_honoured_not_treated_as_junk(self):
+        # `False` is a real value, and must not be mistaken for "unset".
+        cf._write_config({"flora": "off"})
+        self.assertEqual(cf._setting("flora"), (False, "config"))
+        os.environ["CLAUDE_FROG_FLORA"] = "0"
+        self.assertEqual(cf._setting("flora"), (False, "env"))
+
+    def test_unreadable_config_does_not_break_resolution(self):
+        with open(cf._config_path(), "w") as f:
+            f.write("{ not json")
+        self.assertEqual(cf._setting("theme"), (cf.DEFAULT_THEME, "default"))
+
+    def test_parse_applies_settings_to_opts(self):
+        cf._write_config({"theme": "gba", "layout": "right"})
+        _mode, opts = cf._parse(["dance"])
+        self.assertEqual((opts["theme"], opts["layout"]), ("gba", "right"))
+
+
+class TestConfigCli(unittest.TestCase):
+    """`config` is the surface that replaces editing a shell rc."""
+
+    def setUp(self):
+        import shutil
+        self.home = tempfile.mkdtemp(prefix="frog-cfghome-")
+        self.addCleanup(shutil.rmtree, self.home, True)
+        self.env = {**ENV, "XDG_CONFIG_HOME": self.home}
+        self.env.pop("CLAUDE_FROG_THEME", None)
+
+    def _run(self, args, env=None):
+        return subprocess.run([sys.executable, SCRIPT, *args],
+                              capture_output=True, text=True, timeout=15,
+                              env=env or self.env)
+
+    def _stored(self):
+        with open(os.path.join(self.home, "claude-frog", "config.json")) as f:
+            return json.load(f)
+
+    def test_set_and_show(self):
+        self.assertEqual(self._run(["config", "theme", "gba"]).returncode, 0)
+        self.assertEqual(self._stored()["theme"], "gba")
+        out = self._run(["config"]).stdout
+        self.assertIn("gba", out)
+
+    def test_unset_returns_to_default(self):
+        self._run(["config", "theme", "gba"])
+        self._run(["config", "unset", "theme"])
+        self.assertNotIn("theme", self._stored())
+
+    def test_rejects_a_bad_value_without_writing(self):
+        r = self._run(["config", "theme", "playstation"])
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("isn't a valid theme", r.stderr)
+
+    def test_rejects_an_unknown_key(self):
+        self.assertEqual(self._run(["config", "sparkles", "on"]).returncode, 2)
+
+    def test_reports_the_source_of_each_value(self):
+        # The whole point of the source column: an env var pinning a setting is
+        # visible instead of mysterious.
+        env = {**self.env, "CLAUDE_FROG_THEME": "terraria"}
+        out = self._run(["config"], env=env).stdout
+        self.assertIn("CLAUDE_FROG_THEME", out)
+
+    def test_warns_when_an_env_var_shadows_the_write(self):
+        env = {**self.env, "CLAUDE_FROG_THEME": "terraria"}
+        r = self._run(["config", "theme", "snes"], env=env)
+        self.assertEqual(r.returncode, 0)
+        self.assertEqual(self._stored()["theme"], "snes", "the write didn't happen")
+        self.assertIn("pins theme", r.stdout, "the shadowing wasn't reported")
+
+    def test_config_path_is_printable_for_shell_callers(self):
+        r = self._run(["config-path"])
+        self.assertEqual(r.returncode, 0)
+        self.assertTrue(r.stdout.strip().endswith("config.json"))
+
+
+class TestKeybindInstall(unittest.TestCase):
+    """The prefix+F binding is installed for real, not left as a paste-this."""
+
+    def setUp(self):
+        import shutil
+        self.dir = tempfile.mkdtemp(prefix="frog-tmuxconf-")
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self.conf = os.path.join(self.dir, "tmux.conf")
+        self.original = "# mine\nset -g mouse on\nbind r source-file ~/.tmux.conf\n"
+        self._write(self.original)
+
+    def _write(self, text):
+        with open(self.conf, "w") as f:
+            f.write(text)
+
+    def _read(self):
+        with open(self.conf) as f:
+            return f.read()
+
+    def _binds(self):
+        return [l for l in self._read().splitlines() if "claude_frog.py" in l]
+
+    def test_installs_once_and_is_idempotent(self):
+        self.assertTrue(cf.install_keybind(self.conf)[0])
+        self.assertEqual(len(self._binds()), 1)
+        self.assertFalse(cf.install_keybind(self.conf)[0], "re-run rewrote the file")
+        self.assertEqual(len(self._binds()), 1)
+
+    def test_adopts_a_hand_written_binding_instead_of_duplicating(self):
+        # Plenty of people pasted the README snippet in themselves; appending a
+        # second `bind F` would leave two bindings fighting over one key.
+        self._write(self.original +
+                    'bind F run-shell "python3 /old/claude-frog/claude_frog.py toggle"\n')
+        self.assertTrue(cf._keybind_installed(self.conf))
+        cf.install_keybind(self.conf)
+        self.assertEqual(len(self._binds()), 1, "left a duplicate binding")
+        self.assertIn(os.path.abspath(cf.__file__), self._binds()[0])
+
+    def test_uninstall_restores_the_original_file(self):
+        cf.install_keybind(self.conf)
+        self.assertTrue(cf.uninstall_keybind(self.conf)[0])
+        self.assertEqual(self._read(), self.original,
+                         "uninstall did not leave tmux.conf as it found it")
+
+    def test_uninstall_is_a_noop_when_absent(self):
+        self.assertFalse(cf.uninstall_keybind(self.conf)[0])
+        self.assertEqual(self._read(), self.original)
+
+    def test_other_bindings_are_left_alone(self):
+        cf.install_keybind(self.conf)
+        self.assertIn("bind r source-file", self._read())
+        self.assertIn("set -g mouse on", self._read())
+
+    def test_a_missing_tmux_conf_is_created(self):
+        fresh = os.path.join(self.dir, "nested", "tmux.conf")
+        self.assertTrue(cf.install_keybind(fresh)[0])
+        self.assertTrue(os.path.exists(fresh))
+
+
 class _FakeTmux(object):
     """A tmux server just real enough to exercise window ownership.
 

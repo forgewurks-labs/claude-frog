@@ -82,9 +82,8 @@ FALLBACK_UNHINGED_TURNS = 4
 # Environment / flora: each user prompt sprouts one random prop (flower, cloud,
 # rock, tree, or fallen log) that animates in and settles around the frog. Props
 # live only in the dance daemon's memory, so they accumulate through a session
-# and reset when the pane respawns. Set CLAUDE_FROG_FLORA=0 to turn it off.
-FLORA_ENABLED = os.environ.get("CLAUDE_FROG_FLORA", "1").lower() not in (
-    "0", "false", "off", "no", "")
+# and reset when the pane respawns. Turn it off with `config flora off` (or
+# CLAUDE_FROG_FLORA=0 for one session) — see the SETTINGS table below.
 ENTRANCE_FRAMES = 10          # frames a prop takes to grow/drop/roll/drift in
 FLORA_MAX = 400               # runaway backstop only — props are a running tally
                               # that accumulates all session, so this sits far
@@ -306,6 +305,108 @@ def resolve_theme(name):
 def theme_spec(theme):
     """Resolve a theme name to its spec, falling back to the default."""
     return THEMES.get(theme, THEMES[DEFAULT_THEME])
+
+
+# --------------------------------------------------------------------------- #
+# Settings — one table, four surfaces                                          #
+# --------------------------------------------------------------------------- #
+# Changing how the frog looks used to mean editing your shell rc, because every
+# knob was an env var read at import time and nothing persisted. Now there's a
+# config file, and `config` / `setup` / `doctor` / the resolver all read the one
+# table below so they can't drift apart. Adding a knob means adding a row.
+
+CONFIG_DIR = os.path.join(
+    os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config")),
+    "claude-frog",
+)
+
+
+def _config_path():
+    return os.path.join(CONFIG_DIR, "config.json")
+
+
+def _onoff(v):
+    """Parse a human on/off. None for junk, so the resolver falls through."""
+    s = str(v).strip().lower()
+    if s in ("1", "true", "on", "yes", "y"):
+        return True
+    if s in ("0", "false", "off", "no", "n"):
+        return False
+    return None
+
+
+SETTINGS = {
+    "theme": {
+        "env": "CLAUDE_FROG_THEME",
+        "default": DEFAULT_THEME,
+        "choices": tuple(THEMES),
+        "parse": resolve_theme,
+        "show": str,
+        "help": "which pixel style he's rendered in",
+    },
+    "layout": {
+        "env": "CLAUDE_FROG_LAYOUT",
+        "default": DEFAULT_LAYOUT,
+        "choices": tuple(LAYOUTS),
+        "parse": lambda v: str(v) if str(v) in LAYOUTS else None,
+        "show": str,
+        "help": "which edge of the window his pane takes",
+    },
+    "flora": {
+        "env": "CLAUDE_FROG_FLORA",
+        "default": True,
+        "choices": ("on", "off"),
+        "parse": _onoff,
+        "show": lambda v: "on" if v else "off",
+        "help": "sprout a diorama prop on every prompt",
+    },
+}
+
+
+def _read_config():
+    try:
+        with open(_config_path()) as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+
+def _setting(key, flag=None, config=None):
+    """Resolve one setting to (value, source).
+
+    Precedence, highest first: an explicit `--flag`, the `CLAUDE_FROG_*` env var
+    (which is how `claude SEGA` overrides a single session), the config file,
+    then the built-in default. Anything unparseable is skipped rather than
+    honoured, so a typo in one layer falls through to the next instead of
+    leaving the frog themeless.
+    """
+    spec = SETTINGS[key]
+    cfg = _read_config() if config is None else config
+    for raw, src in ((flag, "flag"),
+                     (os.environ.get(spec["env"]), "env"),
+                     (cfg.get(key), "config")):
+        if raw is None or raw == "":
+            continue
+        val = spec["parse"](raw)
+        if val is not None:
+            return val, src
+    return spec["default"], "default"
+
+
+def _write_config(data):
+    """Persist the config file, creating its directory. Returns True on success."""
+    try:
+        os.makedirs(CONFIG_DIR, exist_ok=True)
+        path = _config_path()
+        tmp = path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(data, f, indent=2, sort_keys=True)
+            f.write("\n")
+        os.replace(tmp, path)
+        return True
+    except Exception:
+        return False
 
 
 # --------------------------------------------------------------------------- #
@@ -1144,7 +1245,7 @@ def mode_dance(opts):
     dither = theme_spec(theme)["dither"]
     out = sys.stdout
     chor = Choreographer()
-    scene = Scene() if FLORA_ENABLED else None
+    scene = Scene() if _setting("flora")[0] else None
     # Don't backfill props for turns that already happened before this pane
     # started (e.g. a mid-session toggle) — only sprout on prompts from here on.
     # The baseline comes from `--since` (captured in the spawning hook, before the
@@ -1817,6 +1918,362 @@ FROG_HOOK_EVENTS = ("SessionStart", "UserPromptSubmit", "Stop", "SessionEnd")
 # for it to confirm the launcher is installed. Keep in sync with install.sh.
 MARKER = "claude-frog theme launcher"
 
+# The same trick for the tmux keybind: a marker comment so the line can be found
+# again to update or remove it, without touching anything else in tmux.conf.
+TMUX_MARKER = "claude-frog toggle keybind"
+
+
+# --------------------------------------------------------------------------- #
+# Mode: config  (show / set / unset the persisted settings)                     #
+# --------------------------------------------------------------------------- #
+
+_C_OK = "\033[38;2;120;200;120m"
+_C_WARN = "\033[38;2;230;180;90m"
+_C_DIM = "\033[38;2;140;140;150m"
+_C_PINK = "\033[38;2;240;156;188m"
+_R = "\033[0m"
+
+
+def _config_rows():
+    """Every setting as (key, shown value, source, spec) in table order."""
+    cfg = _read_config()
+    rows = []
+    for key, spec in SETTINGS.items():
+        val, src = _setting(key, None, cfg)
+        rows.append((key, spec["show"](val), src, spec))
+    return rows
+
+
+def _print_config():
+    """Show what the frog is actually using, and *where each answer came from*.
+
+    The source column is the point. A theme pinned by an old `export
+    CLAUDE_FROG_THEME=` line in a shell rc silently outranks the config file,
+    and without this you have to go hunting through dotfiles to find out why the
+    frog won't change.
+    """
+    rows = _config_rows()
+    print(f"{_C_PINK}🐸 Claude Frog — settings{_R}\n")
+    width = max(len(k) for k in SETTINGS)
+    shadowed = False
+    for key, shown, src, spec in rows:
+        note = {
+            "env": f"{_C_WARN}from ${spec['env']}{_R}",
+            "config": f"{_C_DIM}from {_config_path()}{_R}",
+            "default": f"{_C_DIM}default{_R}",
+            "flag": f"{_C_DIM}from a flag{_R}",
+        }[src]
+        print(f"  {key.ljust(width)}  {shown.ljust(9)} {note}")
+        if src == "env" and key in _read_config():
+            shadowed = True
+    print(f"\n{_C_DIM}  choices: " + ";  ".join(
+        f"{k} = {'|'.join(str(c) for c in s['choices'])}"
+        for k, s in SETTINGS.items()) + _R)
+    print(f"{_C_DIM}  set with:  claude_frog.py config <key> <value>{_R}")
+    if shadowed:
+        print(f"\n{_C_WARN}  ⚠️  An environment variable is overriding your config "
+              f"file.{_R}\n     It's usually an `export CLAUDE_FROG_*` line left in "
+              "your shell rc.\n     Remove it, or keep it if you meant to pin that "
+              "session.")
+
+
+def mode_config(argv):
+    """`config` shows everything; `config <key> <value>` / `config unset <key>` set.
+
+    An explicit user action, so unlike the tap/hook paths it reports failure
+    rather than swallowing it.
+    """
+    args = [a for a in argv[1:] if not a.startswith("-")]
+    if not args:
+        _print_config()
+        sys.exit(0)
+
+    unset = args[0] == "unset"
+    if unset:
+        args = args[1:]
+    if not args or args[0] not in SETTINGS:
+        sys.stderr.write(
+            f"unknown setting: {args[0] if args else '(none)'}\n"
+            f"known settings: {', '.join(SETTINGS)}\n")
+        sys.exit(2)
+    key = args[0]
+    spec = SETTINGS[key]
+    cfg = _read_config()
+    # Report what's STORED, not what's in effect: with an env var shadowing the
+    # file, "unchanged" would be a lie about a write that did happen.
+    before = cfg.get(key, "(unset)")
+
+    if unset:
+        cfg.pop(key, None)
+    else:
+        if len(args) < 2:
+            sys.stderr.write(f"usage: config {key} <{'|'.join(str(c) for c in spec['choices'])}>\n")
+            sys.exit(2)
+        val = spec["parse"](args[1])
+        if val is None:
+            sys.stderr.write(
+                f"{args[1]!r} isn't a valid {key} — pick one of: "
+                f"{', '.join(str(c) for c in spec['choices'])}\n")
+            sys.exit(2)
+        cfg[key] = spec["show"](val)
+
+    if not _write_config(cfg):
+        sys.stderr.write(f"could not write {_config_path()}\n")
+        sys.exit(1)
+
+    saved = _read_config()
+    after = saved.get(key, "(unset)")
+    if before == after:
+        print(f"{key}: {after} (unchanged)")
+    else:
+        print(f"{_C_OK}{key}: {before} → {after}{_R}   ({_config_path()})")
+    # The write can succeed and still not be what the frog uses. Say so, rather
+    # than letting it look like a broken setting.
+    effective, src = _setting(key, None, saved)
+    if src == "env":
+        print(f"{_C_WARN}⚠️  ${spec['env']} pins {key} to "
+              f"{spec['show'](effective)} for new sessions — unset it in your "
+              f"shell rc for this to take effect.{_R}")
+    sys.exit(0)
+
+
+# --------------------------------------------------------------------------- #
+# Mode: setup  (the first-run wizard)                                          #
+# --------------------------------------------------------------------------- #
+
+
+def _open_tty():
+    """The human's terminal, or None if there isn't one.
+
+    Read from /dev/tty rather than stdin so the wizard still works when the
+    whole installer was piped to bash (curl … | bash puts the *script* on
+    stdin).
+    """
+    try:
+        return open("/dev/tty")
+    except Exception:
+        return None
+
+
+def _ask(tty, prompt, choices, current, preview=None):
+    """One numbered multiple-choice question. Returns a choice."""
+    try:
+        print(f"\n{_C_PINK}{prompt}{_R}")
+        for i, c in enumerate(choices, 1):
+            mark = " ←  current" if c == current else ""
+            print(f"  {i}. {c}{_C_DIM}{mark}{_R}")
+            if preview:
+                for line in preview(c):
+                    print("     " + line)
+        while True:
+            sys.stdout.write(f"\nPick 1–{len(choices)} [{current}]: ")
+            sys.stdout.flush()
+            raw = (tty.readline() or "").strip()
+            if not raw:
+                return current
+            if raw.isdigit() and 1 <= int(raw) <= len(choices):
+                return choices[int(raw) - 1]
+            if raw in choices:
+                return raw
+            print(f"{_C_WARN}  not one of the options{_R}")
+    except Exception:
+        return current
+
+
+def _theme_preview(theme):
+    """Two rows of the real frog, in that theme, for the wizard to show."""
+    try:
+        spec = theme_spec(theme)
+        rows = render_pixels(_colorize(FROG, spec["base"], spec["dither"]))
+        return [r + _R for r in rows[:4]]
+    except Exception:
+        return []
+
+
+def mode_setup(opts):
+    """Interactive first-run wizard: pick a look, write it to the config file.
+
+    Exists because the alternative was editing a shell rc, which is a strange
+    thing to ask of someone who just wanted a frog.
+    """
+    tty = _open_tty()
+    if tty is None:
+        # Nobody to ask. Persisting the values we happen to resolve right now
+        # would bake an env var's answer into the config file as though the user
+        # had chosen it — so write nothing and say so.
+        print(f"{_C_DIM}🐸 No terminal to ask on — skipping setup. "
+              f"Run `setup` later, or `config <key> <value>`.{_R}")
+        sys.exit(0)
+    try:
+        print(f"{_C_PINK}🐸 Let's set up your frog.{_R}")
+        print(f"{_C_DIM}   Enter keeps what's there. Everything is changeable "
+              f"later with `config`.{_R}")
+        cfg = _read_config()
+        theme = _ask(tty, "Which style?", list(SETTINGS["theme"]["choices"]),
+                     _setting("theme", None, cfg)[0], _theme_preview)
+        layout = _ask(tty, "Where should his pane go?",
+                      list(SETTINGS["layout"]["choices"]),
+                      _setting("layout", None, cfg)[0])
+        flora = _ask(tty, "Sprout a diorama prop on every prompt?",
+                     list(SETTINGS["flora"]["choices"]),
+                     SETTINGS["flora"]["show"](_setting("flora", None, cfg)[0]))
+    finally:
+        try:
+            tty.close()
+        except Exception:
+            pass
+    cfg.update({"theme": theme, "layout": layout, "flora": flora})
+    if not _write_config(cfg):
+        sys.stderr.write(f"could not write {_config_path()}\n")
+        sys.exit(1)
+    print(f"\n{_C_OK}✅ Saved to {_config_path()}{_R}")
+    _print_config()
+    sys.exit(0)
+
+
+# --------------------------------------------------------------------------- #
+# The tmux toggle keybind                                                      #
+# --------------------------------------------------------------------------- #
+# Previously this was a snippet you were told to hand-paste into tmux.conf with
+# the path swapped in yourself — so in practice nobody had the keybind the
+# README advertised. The installer writes it now.
+
+
+def _tmux_conf_path():
+    """Where this machine keeps tmux.conf: whichever exists, else the classic."""
+    for p in ("~/.tmux.conf", "~/.config/tmux/tmux.conf"):
+        full = os.path.expanduser(p)
+        if os.path.exists(full):
+            return full
+    return os.path.expanduser("~/.tmux.conf")
+
+
+def _keybind_line():
+    return f'bind F run-shell "python3 {os.path.abspath(__file__)} toggle"'
+
+
+def _is_frog_bind(line):
+    """True for any line that binds a key to the frog's toggle.
+
+    Catches hand-written bindings as well as ours: plenty of people pasted the
+    README snippet in themselves, and appending a second `bind F` next to
+    theirs would leave two bindings fighting over one key.
+    """
+    s = line.strip()
+    return (s.startswith("bind") and "claude_frog.py" in s and "toggle" in s)
+
+
+def _keybind_installed(path=None):
+    try:
+        with open(path or _tmux_conf_path()) as f:
+            text = f.read()
+    except Exception:
+        return False
+    return TMUX_MARKER in text or any(_is_frog_bind(l) for l in text.splitlines())
+
+
+def install_keybind(path=None):
+    """Append the marker-guarded `prefix + F` binding. Returns (changed, path).
+
+    Idempotent: an existing block is rewritten in place, so moving the checkout
+    updates the path rather than stacking a second binding.
+    """
+    path = path or _tmux_conf_path()
+    block = f"\n# {TMUX_MARKER} — prefix + F hides / summons the frog\n{_keybind_line()}\n"
+    try:
+        lines = []
+        if os.path.exists(path):
+            with open(path) as f:
+                lines = f.read().splitlines(True)
+        kept, skip = [], False
+        for line in lines:
+            if TMUX_MARKER in line:
+                skip = True                 # drop the marker and its bind line
+                continue
+            if skip:
+                skip = False
+                if line.lstrip().startswith("bind"):
+                    continue
+            if _is_frog_bind(line):         # adopt a hand-written binding
+                continue
+            kept.append(line)
+        old = "".join(lines)
+        new = "".join(kept).rstrip("\n") + "\n" + block if kept else block.lstrip("\n")
+        if old == new:
+            return False, path
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            f.write(new)
+        # Load it now so the keybind works without a reload — but ONLY when we
+        # wrote this machine's real tmux.conf and a server is actually up.
+        # Sourcing an arbitrary --tmux-conf would apply a scratch file's every
+        # setting to the user's live session.
+        r = _tmux("has-session")
+        if path == _tmux_conf_path() and r is not None and r.returncode == 0:
+            _tmux("source-file", path)
+        return True, path
+    except Exception:
+        return False, path
+
+
+def uninstall_keybind(path=None):
+    """Remove the marker-guarded binding, leaving the rest of tmux.conf alone."""
+    path = path or _tmux_conf_path()
+    try:
+        if not os.path.exists(path):
+            return False, path
+        with open(path) as f:
+            lines = f.read().splitlines(True)
+        kept, skip, dropped = [], False, False
+        for line in lines:
+            if TMUX_MARKER in line:
+                skip, dropped = True, True
+                continue
+            if skip:
+                skip = False
+                if line.lstrip().startswith("bind"):
+                    continue
+            if _is_frog_bind(line):
+                dropped = True
+                continue
+            kept.append(line)
+        if not dropped:
+            return False, path
+        # Our block is preceded by a blank separator line; drop that too, so an
+        # uninstall leaves tmux.conf byte-identical to how we found it.
+        text = "".join(kept).rstrip("\n")
+        with open(path, "w") as f:
+            f.write(text + "\n" if text else "")
+        return True, path
+    except Exception:
+        return False, path
+
+
+def mode_config_path(opts):
+    """Print where settings live, so shell callers don't reimplement XDG rules."""
+    sys.stdout.write(_config_path() + "\n")
+    sys.exit(0)
+
+
+def mode_tmux_conf_path(opts):
+    """Print which tmux.conf the keybind would be written to."""
+    sys.stdout.write(_tmux_conf_path() + "\n")
+    sys.exit(0)
+
+
+def mode_install_keybind(opts):
+    changed, path = install_keybind(opts.get("tmux_conf"))
+    print(f"✅ tmux keybind {'added to' if changed else 'already in'} {path}"
+          f"   (prefix + F)")
+    sys.exit(0)
+
+
+def mode_uninstall_keybind(opts):
+    changed, path = uninstall_keybind(opts.get("tmux_conf"))
+    print(f"   {'-' if changed else '•'} tmux keybind "
+          f"{'removed from' if changed else 'not found in'} {path}")
+    sys.exit(0)
+
 
 def _frog_cmd(kind):
     """The command string baked into settings.json for `kind` (hook/tap)."""
@@ -2095,16 +2552,44 @@ def mode_doctor(opts):
                      "all 4 events wired" if hooks_ok
                      else "some hooks missing — re-run install.sh"))
 
-    raw = os.environ.get("CLAUDE_FROG_THEME")
-    theme = resolve_theme(raw) or DEFAULT_THEME
-    rows.append(("Theme", True, False,
-                 theme + ("" if raw else " (default)")))
+    # Settings, and — the useful part — where each answer is coming from. An
+    # `export CLAUDE_FROG_THEME=` left in a shell rc silently outranks the
+    # config file, and this is where you find that out.
+    have_config = os.path.exists(_config_path())
+    rows.append(("Settings file", True, False,
+                 _config_path() if have_config
+                 else "none yet — run `setup`, or `config <key> <value>`"))
+    for key, shown, src, spec in _config_rows():
+        note = {"env": f"pinned by ${spec['env']}",
+                "config": "from your settings file",
+                "flag": "from a flag",
+                "default": "default"}[src]
+        shadowed = src == "env" and key in _read_config()
+        rows.append((key.capitalize(), not shadowed, False,
+                     f"{shown}  ({note})"
+                     + (" — this is overriding your settings file" if shadowed else "")))
 
     in_tmux = bool(os.environ.get("TMUX"))
     rows.append(("Dancing pane (tmux)", in_tmux, False,
                  "in tmux — you get the full show" if in_tmux
                  else "not in tmux — the frog lives in a tmux pane, so "
                       "you won't see him (add tmux + WezTerm)"))
+
+    kb = _keybind_installed()
+    rows.append(("Toggle keybind", kb, False,
+                 f"prefix + F, in {_tmux_conf_path()}" if kb
+                 else "not installed — run install.sh (or `install-keybind`)"))
+
+    # One frog per window is the contract; surface it if reality disagrees.
+    if in_tmux:
+        per_win = {}
+        for _pane, win in _frog_panes().items():
+            per_win[win] = per_win.get(win, 0) + 1
+        crowded = sorted(w for w, n in per_win.items() if n > 1)
+        rows.append(("Frogs on screen", not crowded, False,
+                     f"{sum(per_win.values())} in {len(per_win)} window(s)"
+                     if not crowded else
+                     f"more than one in {', '.join(crowded)} — run `cleanup`"))
 
     crit_ok = all(ok for _, ok, critical, _ in rows if critical)
 
@@ -2148,7 +2633,7 @@ def _parse(argv):
     opts = {"session": None, "window": None, "layout": None, "theme": None,
             "always": False, "party": False, "event": None,
             "settings": None, "statusline_mode": "tap", "rc": None,
-            "minimal": False, "since": None}
+            "minimal": False, "since": None, "tmux_conf": None}
     i = 1
     while i < len(argv):
         a = argv[i]
@@ -2168,6 +2653,8 @@ def _parse(argv):
             i += 1; opts["statusline_mode"] = argv[i]
         elif a == "--rc":
             i += 1; opts["rc"] = argv[i]
+        elif a == "--tmux-conf":
+            i += 1; opts["tmux_conf"] = argv[i]
         elif a == "--since":
             i += 1
             try:
@@ -2185,17 +2672,13 @@ def _parse(argv):
         opts["session"] = os.environ.get("CLAUDE_FROG_SESSION")
     if opts["window"] is not None and not _valid_win(opts["window"]):
         opts["window"] = None
-    if opts["layout"] is None:
-        # env lets the hook and the tmux toggle keybind agree on a layout
-        # without threading --layout through both call sites
-        opts["layout"] = os.environ.get("CLAUDE_FROG_LAYOUT") or DEFAULT_LAYOUT
-    if opts["layout"] not in LAYOUTS:
-        opts["layout"] = DEFAULT_LAYOUT
-    # env lets the SessionStart hook and the tmux toggle keybind agree on a
-    # theme without threading --theme through each. Accept friendly aliases
-    # ("SEGA", "Game Boy") from either source.
-    raw_theme = opts["theme"] or os.environ.get("CLAUDE_FROG_THEME")
-    opts["theme"] = resolve_theme(raw_theme) or DEFAULT_THEME
+    # Both resolve through SETTINGS (flag > env > config file > default), so the
+    # SessionStart hook and the tmux toggle keybind agree on an answer without
+    # threading --layout / --theme through every call site. Friendly theme
+    # spellings ("SEGA", "Game Boy") are accepted from any layer.
+    cfg = _read_config()
+    opts["layout"] = _setting("layout", opts["layout"], cfg)[0]
+    opts["theme"] = _setting("theme", opts["theme"], cfg)[0]
     return mode, opts
 
 
@@ -2228,6 +2711,18 @@ def main():
             mode_uninstall_settings(opts)
         elif mode == "doctor":
             mode_doctor(opts)
+        elif mode == "config":
+            mode_config(sys.argv[1:])
+        elif mode == "setup":
+            mode_setup(opts)
+        elif mode == "config-path":
+            mode_config_path(opts)
+        elif mode == "tmux-conf-path":
+            mode_tmux_conf_path(opts)
+        elif mode == "install-keybind":
+            mode_install_keybind(opts)
+        elif mode == "uninstall-keybind":
+            mode_uninstall_keybind(opts)
         else:
             sys.stderr.write(f"unknown mode: {mode}\n")
             sys.exit(2)

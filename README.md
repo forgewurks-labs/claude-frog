@@ -115,23 +115,31 @@ context you are).
 ### 🕺 Dancing pane frog (tmux + WezTerm)
 
 A dedicated tmux pane where he dances smoothly (~12 fps) for exactly as long as
-Claude is working, then idles between turns — one frog per session, so a
-parallel fan-out gives you a whole chorus line.
+Claude is working, then idles between turns.
+
+**One frog per tmux window** — no matter how many Claude sessions that window
+ends up holding. A headless `claude -p` fired off by a subagent, a nested
+`claude`, a `/clear` that mints a fresh session id: they all join the frog
+that's already there rather than splitting another pane beside him. He shows
+whichever session is working right now, and he leaves when the last one does.
+Want a chorus line? Open more windows.
 
 Add the hooks to `~/.claude/settings.json` (see
 [`install/settings-hooks.json`](install/settings-hooks.json) for the full
 block):
 
-- `SessionStart` → spawns his pane (only if you're inside tmux)
+- `SessionStart` → joins this window's frog, spawning his pane only if the
+  window hasn't got one (and only if you're inside tmux)
 - `UserPromptSubmit` → "a turn started, dance!" (+ counts turns)
 - `Stop` → "turn's done, rest"
-- `SessionEnd` → tears his pane down, no orphans
+- `SessionEnd` → drops this session's claim; the last one out tears the pane
+  down, so no orphans
 
 And the tmux toggle keybind (see
 [`install/tmux.conf.snippet`](install/tmux.conf.snippet)):
 
 ```tmux
-# prefix + F  →  hide / summon the frog   (capital F; find-window stays on f)
+# prefix + F  →  hide / summon the frog in this window   (capital F; find-window stays on f)
 bind F run-shell "python3 /path/to/claude-frog/claude_frog.py toggle"
 ```
 
@@ -297,15 +305,21 @@ UserPromptSubmit / Stop hooks ─┐
                                ├─► ~/.cache/claude-frog/<session>.think   (dance vs idle, turn count)
       tap (each statusLine ────┼─► ~/.cache/claude-frog/<session>.ctx     (absolute context tokens)
               refresh)         │
-        pane daemon (12fps) ◄──┘   reads both, renders the frog
+                               ├─► ~/.cache/claude-frog/win-<N>.json      (who owns this window's frog)
+                               │
+        pane daemon (12fps) ◄──┘   reads all three, renders the frog
 ```
 
 - **Hooks** own the *think-state* (they can't see tokens).
 - **The statusLine** owns the *token gauge* (only it can see tokens): `tap`
   reads the payload each refresh and writes it to a file the daemon reads,
   printing nothing.
-- Everything is keyed by session id, so multiple Claude Code sessions each get
-  their own independent frog.
+- Session state is keyed by session id, but **the frog belongs to the tmux
+  window**. Its record reference-counts the sessions living there and names the
+  one currently working; the daemon follows that name, and the pane is only
+  ever created when the window has none. That's what keeps it to one frog.
+- A claim is dropped when the tmux pane its Claude was running in disappears —
+  real liveness, so a crashed session can't hold a frog hostage.
 - The tap and hook paths **never crash and always exit 0** — a broken frog can
   never break your prompt.
 

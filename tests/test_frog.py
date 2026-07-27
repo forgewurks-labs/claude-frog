@@ -383,6 +383,245 @@ class TestPruneStale(unittest.TestCase):
         self.assertFalse(os.path.exists(stale), "sweep stopped at the bad file")
 
 
+class _FakeTmux(object):
+    """A tmux server just real enough to exercise window ownership.
+
+    Stands in for cf._tmux, so the pane bookkeeping can be tested without an
+    actual tmux server (and without splitting panes into the developer's own
+    terminal, which is how this bug got found in the first place).
+    """
+
+    class _R(object):
+        def __init__(self, stdout="", rc=0):
+            self.stdout, self.returncode, self.stderr = stdout, rc, ""
+
+    def __init__(self):
+        self.panes = {}          # pane_id -> window_id
+        self.opts = {}           # pane_id -> {option: value}
+        self.spawned = []        # the commands split-window was asked to run
+        self._next = 100
+
+    def add_pane(self, win):
+        pid = "%%%d" % self._next
+        self._next += 1
+        self.panes[pid] = win
+        return pid
+
+    def _arg(self, args, flag):
+        return args[args.index(flag) + 1] if flag in args else None
+
+    def __call__(self, *args):
+        args = list(args)
+        cmd = args[0] if args else ""
+        if cmd == "list-panes":
+            fmt = self._arg(args, "-F") or "#{pane_id}"
+            lines = []
+            for pid in self.panes:
+                line = fmt.replace("#{pane_id}", pid)
+                line = line.replace(
+                    "#{@claude_frog}", self.opts.get(pid, {}).get("@claude_frog", ""))
+                lines.append(line)
+            return self._R("\n".join(lines))
+        if cmd == "display-message":
+            target = self._arg(args, "-t")
+            return self._R(self.panes.get(target, "") + "\n")
+        if cmd == "split-window":
+            target = self._arg(args, "-t")
+            pid = self.add_pane(self.panes.get(target, target))
+            self.spawned.append(args[-1])
+            return self._R(pid + "\n")
+        if cmd == "kill-pane":
+            self.panes.pop(self._arg(args, "-t"), None)
+            return self._R()
+        if cmd == "set-option":
+            self.opts.setdefault(self._arg(args, "-t"), {})[args[-2]] = args[-1]
+            return self._R()
+        return self._R()
+
+
+class _WindowCase(unittest.TestCase):
+    """Shared fixture: a fake tmux server with one Claude pane in window @1."""
+
+    def setUp(self):
+        import shutil
+        self._old_cache, self._old_tmux = cf.CACHE_DIR, cf._tmux
+        cf.CACHE_DIR = tempfile.mkdtemp(prefix="frog-win-")
+        self.tmux = _FakeTmux()
+        cf._tmux = self.tmux
+        self.addCleanup(setattr, cf, "CACHE_DIR", self._old_cache)
+        self.addCleanup(setattr, cf, "_tmux", self._old_tmux)
+        self.addCleanup(shutil.rmtree, cf.CACHE_DIR, True)
+        self.claude = self.tmux.add_pane("@1")
+        self._saved = {k: os.environ.get(k) for k in ("TMUX", "TMUX_PANE")}
+        self.addCleanup(self._restore_env)
+        os.environ["TMUX"] = "/tmp/fake-tmux,1,0"
+        os.environ["TMUX_PANE"] = self.claude
+
+    def _restore_env(self):
+        for k, v in self._saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    def _frogs(self, win="@1"):
+        """Frog panes tmux is currently showing in `win`."""
+        return [p for p, w in self.tmux.panes.items()
+                if w == win and self.tmux.opts.get(p, {}).get("@claude_frog")]
+
+
+class TestWindowSingleton(_WindowCase):
+    """At most ONE frog pane per tmux window, however many sessions share it.
+
+    The bug this locks down: pane life used to be keyed on session_id alone, so
+    every extra Claude session started inside a window split *another* frog into
+    it — a headless `claude -p` fired off by a subagent or a skill, a nested
+    `claude`, a `/clear` that mints a fresh session id. The panes piled up.
+    """
+
+    # -- the invariant ----------------------------------------------------- #
+
+    def test_extra_sessions_join_the_window_instead_of_spawning(self):
+        cf._win_claim("session-a")
+        self.assertEqual(len(self._frogs()), 1, "first session got no frog")
+        for sid in ("session-b", "session-c", "session-d"):
+            cf._win_claim(sid)
+        self.assertEqual(len(self._frogs()), 1,
+                         "a fan-out of sessions spawned extra frogs")
+        self.assertEqual(len(cf._read_win("@1")["sessions"]), 4,
+                         "the extra sessions were not counted as claimants")
+
+    def test_concurrent_claims_still_spawn_only_one(self):
+        # Two SessionStart hooks racing for an empty window is the case the
+        # window lock exists for: without it both see "no pane" and both split.
+        import threading
+        threads = [threading.Thread(target=cf._win_claim, args=("s%d" % i,))
+                   for i in range(6)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        self.assertEqual(len(self._frogs()), 1,
+                         "concurrent claims raced past the lock")
+
+    def test_each_window_gets_its_own_frog(self):
+        cf._win_claim("session-a")
+        os.environ["TMUX_PANE"] = self.tmux.add_pane("@2")
+        cf._win_claim("session-b")
+        self.assertEqual(len(self._frogs("@1")), 1)
+        self.assertEqual(len(self._frogs("@2")), 1)
+
+    # -- teardown ---------------------------------------------------------- #
+
+    def test_last_claimant_out_kills_the_frog(self):
+        cf._win_claim("session-a")
+        cf._win_claim("session-b")
+        frog = self._frogs()[0]
+        cf._win_release("session-a")
+        self.assertIn(frog, self.tmux.panes,
+                      "one session ending killed a frog another still needs")
+        cf._win_release("session-b")
+        self.assertNotIn(frog, self.tmux.panes, "the last session out left an orphan")
+        self.assertFalse(os.path.exists(cf._win_path("@1")))
+
+    def test_a_dead_claude_pane_releases_its_claim(self):
+        # Claude hard-killed (crashed terminal, `kill -9`): no SessionEnd ever
+        # fires, so liveness has to come from the pane it was running in.
+        cf._win_claim("session-a")
+        frog = self._frogs()[0]
+        del self.tmux.panes[self.claude]
+        cf._prune_stale()
+        self.assertNotIn(frog, self.tmux.panes,
+                         "a crashed session held its frog forever")
+
+    # -- who the frog is showing ------------------------------------------- #
+
+    def test_active_follows_whoever_just_worked(self):
+        cf._win_claim("session-a")
+        cf._win_claim("session-b")
+        self.assertEqual(cf._read_win("@1")["active"], "session-b")
+        cf._win_touch("session-a")
+        self.assertEqual(cf._read_win("@1")["active"], "session-a",
+                         "the frog did not follow the session that just worked")
+
+    def test_release_hands_the_frog_to_a_survivor(self):
+        cf._win_claim("session-a")
+        cf._win_claim("session-b")
+        cf._win_release("session-b")
+        self.assertEqual(cf._read_win("@1")["active"], "session-a")
+
+    # -- end to end through the real hook dispatch ------------------------- #
+
+    def test_hook_events_keep_one_frog(self):
+        import io
+
+        def hook(event, session):
+            saved = sys.stdin
+            sys.stdin = io.StringIO(json.dumps(
+                {"hook_event_name": event, "session_id": session}))
+            try:
+                with self.assertRaises(SystemExit):
+                    cf.mode_hook({})
+            finally:
+                sys.stdin = saved
+
+        hook("SessionStart", "sess-a")
+        hook("SessionStart", "sess-b")
+        self.assertEqual(len(self._frogs()), 1,
+                         "two SessionStarts in one window spawned two frogs")
+        hook("SessionEnd", "sess-a")
+        self.assertEqual(len(self._frogs()), 1, "a live session lost its frog")
+        hook("SessionEnd", "sess-b")
+        self.assertEqual(len(self._frogs()), 0, "the frog outlived its last session")
+
+    # -- the daemon is told which window it serves ------------------------- #
+
+    def test_spawned_daemon_is_window_scoped(self):
+        cf._win_claim("session-a")
+        self.assertIn("--window @1", self.tmux.spawned[0])
+        self.assertNotIn("--session", self.tmux.spawned[0])
+
+    def test_window_ids_are_validated_before_reaching_a_command_line(self):
+        for bad in ("", None, "@", "1", "@1; rm -rf ~", "@1 x", "../@1"):
+            self.assertFalse(cf._valid_win(bad), bad)
+        self.assertTrue(cf._valid_win("@1"))
+        self.assertTrue(cf._valid_win("@1234"))
+
+
+class TestToggleIsWindowScoped(_WindowCase):
+    """prefix+F must mean the same thing in every window.
+
+    It used to toggle whichever session in the whole cache had the newest .pane
+    file, which in a multi-window setup is somebody else's frog.
+    """
+
+    def _toggle(self):
+        with self.assertRaises(SystemExit):
+            cf.mode_toggle({})
+
+    def test_toggle_hides_then_summons_in_this_window(self):
+        cf._win_claim("session-a")
+        self._toggle()
+        self.assertEqual(len(self._frogs()), 0, "toggle did not hide the frog")
+        self._toggle()
+        self.assertEqual(len(self._frogs()), 1, "toggle did not summon him back")
+
+    def test_toggle_leaves_other_windows_alone(self):
+        cf._win_claim("session-a")
+        other = self.tmux.add_pane("@2")
+        os.environ["TMUX_PANE"] = other
+        cf._win_claim("session-b")
+        self._toggle()                       # we are in @2
+        self.assertEqual(len(self._frogs("@2")), 0)
+        self.assertEqual(len(self._frogs("@1")), 1, "toggle reached into @1")
+
+    def test_summoning_after_a_hand_killed_pane_takes_one_press(self):
+        cf._win_claim("session-a")
+        del self.tmux.panes[self._frogs()[0]]   # `tmux kill-pane` by hand
+        self._toggle()
+        self.assertEqual(len(self._frogs()), 1, "summoning back took two presses")
+
+
 class TestCliModesExitZero(unittest.TestCase):
     """The statusline / tap / hook / preview paths must never break a prompt."""
 

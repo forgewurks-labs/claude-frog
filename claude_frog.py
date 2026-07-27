@@ -107,6 +107,21 @@ CACHE_DIR = os.path.join(
 # is genuinely dead.
 STALE_STATE_SECS = 7 * 24 * 3600
 
+# The frog is a property of the tmux WINDOW, not of a Claude session: exactly
+# one pane per window, no matter how many sessions are running in it. Several
+# sessions can share a window (a headless `claude -p` fired off by a subagent or
+# a skill, a nested `claude`, a `/clear` that mints a fresh session id), so the
+# window file reference-counts its claimants and the last one out kills the
+# pane. LOCK_* bound the file lock that serializes concurrent SessionStarts —
+# without it two sessions racing to claim an empty window both spawn.
+WIN_LOCK_WAIT_SECS = 1.0      # how long to spin for the lock before giving up
+WIN_LOCK_STALE_SECS = 10.0    # steal a lock older than this (holder died)
+
+# A claim is live while the tmux pane its session runs in still exists — real
+# liveness, not a timeout, so a crashed Claude can't hold a frog hostage. The
+# timestamp below is only the fallback for claims whose pane we never resolved.
+WIN_CLAIM_STALE_SECS = 12 * 3600
+
 # --------------------------------------------------------------------------- #
 # Palette                                                                      #
 # --------------------------------------------------------------------------- #
@@ -1122,6 +1137,7 @@ def _term_size():
 
 def mode_dance(opts):
     session = opts["session"]
+    win = opts.get("window")
     always = opts["always"]
     party = opts["party"]
     theme = opts.get("theme", DEFAULT_THEME)
@@ -1133,9 +1149,23 @@ def mode_dance(opts):
     # started (e.g. a mid-session toggle) — only sprout on prompts from here on.
     # The baseline comes from `--since` (captured in the spawning hook, before the
     # pane booted) so a fast first prompt can't slip in before we read it here.
-    last_turns = opts["since"] if opts.get("since") is not None \
-        else _read_think(session)[1]
+    # Kept per session, because a window's frog follows whichever session is
+    # working: without it, switching to a session with a lower turn count would
+    # bank a burst of props and fire them all when it switched back.
+    seen_turns = {}
+    if session and opts.get("since") is not None:
+        seen_turns[_safe_session(session)] = opts["since"]
     frame = 0
+
+    def _who():
+        """The session this frog is currently showing.
+
+        A window-scoped frog follows the window's active claimant; a
+        `--session` frog (manual `dance`, tests) is pinned to one.
+        """
+        if not win:
+            return session
+        return _read_win(win).get("active") or session or "default"
 
     def cleanup(*_):
         # Guarded: if the pane's tty is already gone (tmux killed it out from
@@ -1162,17 +1192,20 @@ def mode_dance(opts):
 
     try:
         while True:
-            state, turns = _read_think(session)
-            tokens = _read_ctx(session)
+            sess = _who()
+            state, turns = _read_think(sess)
+            tokens = _read_ctx(sess)
             active = party or always or (state == "thinking")
             g = 1.0 if party else goofiness(tokens, turns)
             sk = shake_px(tokens) if not party else float(SHAKE_MAX_PX)
             # party maxes everything, so blush him fully pink too
             palette = palette_for(PINK_FULL_TOKENS if party else tokens, theme)
 
-            # self-exit if this session's state has vanished (session ended and
-            # cleanup ran, or files pruned) — no orphan frogs.
-            if not os.path.exists(_paths(session)[0]):
+            # self-exit once the state we exist for has vanished (last claimant
+            # released the window, session ended and cleanup ran, or files were
+            # pruned) — no orphan frogs.
+            watched = _win_path(win) if win else _paths(sess)[0]
+            if not os.path.exists(watched):
                 ticks_missing += 1
                 if ticks_missing > 40:
                     cleanup()
@@ -1200,9 +1233,13 @@ def mode_dance(opts):
             # behind the frog. Guarded so a prop bug can never stop him dancing.
             if scene is not None:
                 try:
-                    for _ in range(max(0, turns - last_turns)):
+                    key = _safe_session(sess)
+                    # First sight of a session: adopt its count as the baseline
+                    # rather than backfilling a prop per turn it ran elsewhere.
+                    base = seen_turns.get(key, turns)
+                    seen_turns[key] = turns
+                    for _ in range(max(0, turns - base)):
                         scene.spawn(frame, cols)
-                    last_turns = turns
                     for spr, px, py in scene.blits(frame, cols, stage_h,
                                                    rest_x, sw_):
                         blit(stage, spr, px, py)
@@ -1313,25 +1350,162 @@ def _in_tmux():
     return bool(os.environ.get("TMUX"))
 
 
-def _pane_alive(session):
-    """True if the session's recorded frog pane still exists in tmux."""
-    try:
-        pane_path = _paths(session)[2]
-        if not os.path.exists(pane_path):
-            return False
-        pid = open(pane_path).read().strip()
-        r = _tmux("list-panes", "-a", "-F", "#{pane_id}")
-        return bool(r and pid and pid in (r.stdout or "").split())
-    except Exception:
+def _live_panes():
+    """Every pane id tmux currently knows about, across all its sessions."""
+    r = _tmux("list-panes", "-a", "-F", "#{pane_id}")
+    return set((r.stdout or "").split()) if r else set()
+
+
+def _frog_panes():
+    """Frog panes tmux is showing right now: {pane_id: window_id it claims}.
+
+    Read off the `@claude_frog` pane option every spawn stamps on, so a frog can
+    be recognised even when no window file admits to owning him (an upgrade
+    orphan, or a pane whose state was wiped underneath it).
+    """
+    r = _tmux("list-panes", "-a", "-F", "#{pane_id} #{@claude_frog}")
+    out = {}
+    for line in (r.stdout or "").splitlines() if r else []:
+        bits = line.split(None, 1)
+        if len(bits) == 2 and bits[1].strip():
+            out[bits[0]] = bits[1].strip()
+    return out
+
+
+def _window_id(pane=None):
+    """The tmux window this process is running in, e.g. "@16".
+
+    Hooks are spawned by Claude Code, which inherits TMUX_PANE from the pane it
+    was launched in — so the window resolves without the caller having to know
+    it. With no pane to go on (a `run-shell` keybind), tmux's own idea of the
+    current window is the right answer.
+    """
+    if not _in_tmux():
+        return None
+    target = pane or os.environ.get("TMUX_PANE")
+    args = ["display-message", "-p"]
+    if target:
+        args += ["-t", target]
+    args.append("#{window_id}")
+    r = _tmux(*args)
+    win = (r.stdout or "").strip() if r else ""
+    return win or None
+
+
+def _valid_win(win):
+    """tmux window ids are "@" + digits. Anything else never reaches a command
+    line — the window id is derived from the environment, and this is the one
+    place that assumption gets checked."""
+    return bool(win) and win[0] == "@" and win[1:].isdigit()
+
+
+def _win_path(win):
+    return os.path.join(CACHE_DIR, "win-" + _safe_session(win) + ".json")
+
+
+class _win_lock(object):
+    """A cheap cross-process lock around one window file.
+
+    O_CREAT|O_EXCL is atomic everywhere we run, which is all this needs: it
+    serializes the read-modify-write in _win_claim so two sessions racing to
+    claim the same empty window can't both spawn a frog. A lock older than
+    WIN_LOCK_STALE_SECS is stolen — its holder was killed mid-update, and a
+    window that can never spawn again is worse than a rare double-update.
+    Unlockable (read-only cache dir) or contended past the deadline, we proceed
+    anyway: the frog is decoration, and must never wedge a hook.
+    """
+
+    def __init__(self, win):
+        self.path = _win_path(win) + ".lock"
+        self.fd = None
+
+    def __enter__(self):
+        deadline = time.time() + WIN_LOCK_WAIT_SECS
+        while True:
+            try:
+                os.makedirs(os.path.dirname(self.path), exist_ok=True)
+                self.fd = os.open(self.path,
+                                  os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+                return self
+            except FileExistsError:
+                pass
+            except Exception:
+                return self
+            try:
+                if time.time() - os.path.getmtime(self.path) > WIN_LOCK_STALE_SECS:
+                    os.remove(self.path)
+                    continue
+            except Exception:
+                pass
+            if time.time() >= deadline:
+                return self
+            time.sleep(0.02)
+
+    def __exit__(self, *exc):
+        if self.fd is not None:
+            try:
+                os.close(self.fd)
+                os.remove(self.path)
+            except Exception:
+                pass
         return False
 
 
-def _spawn_pane(session, layout=DEFAULT_LAYOUT, theme=DEFAULT_THEME):
-    if not _in_tmux():
-        return
-    if _pane_alive(session):
-        return
-    pane_path = _paths(session)[2]
+def _read_win(win):
+    """The window's frog record, normalised so callers never guard on shape."""
+    try:
+        with open(_win_path(win)) as f:
+            d = json.load(f)
+        if not isinstance(d, dict):
+            raise ValueError("not an object")
+    except Exception:
+        d = {}
+    d.setdefault("pane", None)
+    d.setdefault("active", None)
+    if not isinstance(d.get("sessions"), dict):
+        d["sessions"] = {}
+    return d
+
+
+def _newest_claim(sessions):
+    if not sessions:
+        return None
+    return max(sessions.items(),
+               key=lambda kv: float((kv[1] or {}).get("ts") or 0))[0]
+
+
+def _prune_claims(state, live):
+    """Drop claims whose Claude session is demonstrably gone.
+
+    A claim records the tmux pane Claude Code itself runs in, so liveness is a
+    fact we can check rather than a timeout we have to guess: pane gone, session
+    gone. Only claims we never resolved a pane for (Claude started outside tmux,
+    somehow) fall back to ageing out.
+    """
+    cutoff = time.time() - WIN_CLAIM_STALE_SECS
+    keep = {}
+    for sid, rec in state["sessions"].items():
+        rec = rec if isinstance(rec, dict) else {}
+        pane = rec.get("pane")
+        if pane:
+            if pane in live:
+                keep[sid] = rec
+        elif float(rec.get("ts") or 0) > cutoff:
+            keep[sid] = rec
+    state["sessions"] = keep
+    if state.get("active") not in keep:
+        state["active"] = _newest_claim(keep)
+    return state
+
+
+def _spawn_win_pane(win, near, session, layout=DEFAULT_LAYOUT,
+                    theme=DEFAULT_THEME):
+    """Split a frog pane into `win` and return its pane id (None if it failed).
+
+    The only place a frog pane is ever created. `near` is the Claude pane to
+    split off (so he lands beside the session that summoned him rather than
+    beside whatever the window happened to have focused).
+    """
     import shlex
     py = sys.executable or "python3"
     here = os.path.abspath(__file__)
@@ -1342,36 +1516,116 @@ def _spawn_pane(session, layout=DEFAULT_LAYOUT, theme=DEFAULT_THEME):
     # it boots would race a fast first UserPromptSubmit and eat the first prop.
     since = _read_think(session)[1]
     # tmux runs this through a shell: quote the paths (a checkout under a
-    # directory with a space would otherwise break the spawn silently) and
-    # tame the externally supplied session id.
+    # directory with a space would otherwise break the spawn silently). `win` is
+    # already known to be "@"+digits.
     cmd = (f"exec {shlex.quote(py)} {shlex.quote(here)} dance "
-           f"--session {_safe_session(session)} "
-           f"--theme {theme} --since {since}")
-    # -b puts the new pane *before* the current one: above it for a vertical
-    # split, left of it for a horizontal one.
+           f"--window {win} --theme {theme} --since {since}")
+    # -b puts the new pane *before* the target: above it for a vertical split,
+    # left of it for a horizontal one.
     axis, size = LAYOUTS.get(layout, LAYOUTS[DEFAULT_LAYOUT])
     before = ["-b"] if layout in ("top", "left") else []
-    split = ["split-window", axis, *before, "-l", str(size), "-d",
-             "-P", "-F", "#{pane_id}", cmd]
-    r = _tmux(*split)
-    if r and r.returncode == 0:
-        _write_json_raw(pane_path, (r.stdout or "").strip())
+    r = _tmux("split-window", axis, *before, "-l", str(size), "-d",
+              "-t", near or win, "-P", "-F", "#{pane_id}", cmd)
+    if not (r and r.returncode == 0):
+        return None
+    pid = (r.stdout or "").strip()
+    if pid:
+        _tmux("set-option", "-p", "-t", pid, "@claude_frog", win)
+    return pid or None
 
 
-def _write_json_raw(path, text):
-    try:
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w") as f:
-            f.write(text)
-    except Exception:
-        pass
+def _win_claim(session, layout=DEFAULT_LAYOUT, theme=DEFAULT_THEME):
+    """Register `session` as a claimant of its window's frog; spawn if needed.
+
+    This function *is* the one-frog-per-window guarantee. A frog pane is only
+    ever born here, only when the window has none, and only under the window
+    lock — so however many Claude sessions a window ends up holding (a headless
+    `claude -p` from a subagent, a nested `claude`, a `/clear` that mints a new
+    session id), the first one spawns the frog and the rest just join the
+    reference count. Returns the window id, or None when there's nothing to
+    claim (no tmux).
+    """
+    win = _window_id()
+    if not _valid_win(win):
+        return None
+    mine = os.environ.get("TMUX_PANE")
+    sid = _safe_session(session)
+    with _win_lock(win):
+        live = _live_panes()
+        st = _prune_claims(_read_win(win), live)
+        if st.get("pane") not in live:
+            st["pane"] = _spawn_win_pane(win, mine, session, layout, theme)
+            st["theme"], st["layout"] = theme, layout
+        st["sessions"][sid] = {"ts": time.time(), "pane": mine}
+        st["active"] = sid
+        _write_json(_win_path(win), st)
+    return win
+
+
+def _win_touch(session):
+    """Mark `session` as the one currently working in its window.
+
+    The frog shows whatever is working in the window he lives in, which is the
+    only honest reading when a window holds more than one session.
+    """
+    win = _window_id()
+    if not _valid_win(win):
+        return
+    sid = _safe_session(session)
+    with _win_lock(win):
+        st = _read_win(win)
+        if not st["sessions"] and not st.get("pane"):
+            return                      # no frog here; nothing to steer
+        rec = st["sessions"].get(sid)
+        rec = rec if isinstance(rec, dict) else {}
+        rec["ts"] = time.time()
+        if not rec.get("pane"):
+            rec["pane"] = os.environ.get("TMUX_PANE")
+        st["sessions"][sid] = rec
+        st["active"] = sid
+        _write_json(_win_path(win), st)
+
+
+def _win_release(session):
+    """Drop this session's claim. The last claimant out kills the frog."""
+    win = _window_id()
+    if not _valid_win(win):
+        return
+    sid = _safe_session(session)
+    with _win_lock(win):
+        st = _prune_claims(_read_win(win), _live_panes())
+        st["sessions"].pop(sid, None)
+        if st["sessions"]:
+            if st.get("active") == sid:
+                st["active"] = _newest_claim(st["sessions"])
+            _write_json(_win_path(win), st)
+        else:
+            _kill_win_pane(st)
+            try:
+                os.remove(_win_path(win))
+            except Exception:
+                pass
+
+
+def _kill_win_pane(st):
+    pid = (st or {}).get("pane")
+    if pid:
+        _tmux("kill-pane", "-t", pid)
 
 
 def _kill_pane(session):
+    """Legacy: tear down a pre-window-scoping per-session pane.
+
+    Frogs are owned by windows now, but a session that was already running when
+    the upgrade landed still has its old `<session>.pane` file and its own pane.
+    Keeping this means such a session cleans up after itself on SessionEnd
+    instead of leaving a frog nobody claims.
+    """
     _, _, pane_path = _paths(session)
     try:
         if os.path.exists(pane_path):
-            pid = open(pane_path).read().strip()
+            with open(pane_path) as f:
+                pid = f.read().strip()
             if pid:
                 _tmux("kill-pane", "-t", pid)
             os.remove(pane_path)
@@ -1380,38 +1634,60 @@ def _kill_pane(session):
 
 
 def _prune_stale():
-    """Remove state for dead sessions (best-effort).
+    """Remove state for dead sessions and windows (best-effort).
 
-    Two sweeps. First, sessions whose recorded tmux pane is gone — the pane
-    died or tmux was killed. Second, session files with no pane at all:
-    sessions run outside tmux, or hard-killed (crashed terminal, kill-server,
-    OOM) before the SessionEnd hook could clean up, never trip the first
-    sweep, so they used to pile up in CACHE_DIR forever. Those are aged out
-    once they're older than STALE_STATE_SECS (this also catches orphaned
-    .tmp files from interrupted writes). Every file is guarded on its own so
-    one unreadable entry can't stop the rest of the sweep.
+    Three sweeps. First, window records: a window whose every claimant is gone
+    loses its frog, and one whose frog pane died loses the record. Second,
+    legacy per-session panes from before frogs were window-scoped. Third,
+    session files with no pane at all: sessions run outside tmux, or hard-killed
+    (crashed terminal, kill-server, OOM) before the SessionEnd hook could clean
+    up, never trip the pane sweeps, so they used to pile up in CACHE_DIR
+    forever. Those are aged out once they're older than STALE_STATE_SECS (this
+    also catches orphaned .tmp files from interrupted writes). Every file is
+    guarded on its own so one unreadable entry can't stop the rest of the sweep.
     """
     try:
         names = os.listdir(CACHE_DIR)
     except Exception:
         return
-    r = _tmux("list-panes", "-a", "-F", "#{pane_id}")
-    live = set((r.stdout or "").split()) if r else set()
+    live = _live_panes()
     tracked = set()          # sessions that still have a live pane
+
+    for fn in names:
+        if not (fn.startswith("win-") and fn.endswith(".json")):
+            continue
+        try:
+            win = "@" + fn[4:-5]
+            with _win_lock(win):
+                st = _prune_claims(_read_win(win), live)
+                if not st["sessions"]:
+                    _kill_win_pane(st)
+                    os.remove(_win_path(win))
+                else:
+                    if st.get("pane") not in live:
+                        st["pane"] = None
+                    _write_json(_win_path(win), st)
+                    tracked.update(st["sessions"])
+        except Exception:
+            pass
+
     for fn in names:
         if not fn.endswith(".pane"):
             continue
         try:
-            pid = open(os.path.join(CACHE_DIR, fn)).read().strip()
+            with open(os.path.join(CACHE_DIR, fn)) as f:
+                pid = f.read().strip()
             if pid and pid in live:
                 tracked.add(fn[:-5])
             else:
                 _cleanup_session(fn[:-5])
         except Exception:
             pass
+
     cutoff = time.time() - STALE_STATE_SECS
     for fn in names:
-        if fn.endswith(".pane") or fn.split(".")[0] in tracked:
+        if (fn.endswith(".pane") or fn.split(".")[0] in tracked
+                or (fn.startswith("win-") and fn.endswith(".json"))):
             continue
         try:
             p = os.path.join(CACHE_DIR, fn)
@@ -1444,16 +1720,20 @@ def mode_hook(opts):
     if event == "SessionStart":
         _prune_stale()
         _write_json(think_path, {"state": "idle", "turns": 0, "ts": time.time()})
-        _spawn_pane(session, opts.get("layout", DEFAULT_LAYOUT),
-                    opts.get("theme", DEFAULT_THEME))
+        # Joins this window's frog, spawning him only if the window has none.
+        _win_claim(session, opts.get("layout", DEFAULT_LAYOUT),
+                   opts.get("theme", DEFAULT_THEME))
     elif event == "UserPromptSubmit":
         _, turns = _read_think(session)
         _write_json(think_path, {"state": "thinking", "turns": turns + 1,
                                  "ts": time.time()})
+        _win_touch(session)
     elif event == "Stop":
         _, turns = _read_think(session)
         _write_json(think_path, {"state": "idle", "turns": turns, "ts": time.time()})
+        _win_touch(session)
     elif event in ("SessionEnd", "Cleanup"):
+        _win_release(session)
         _cleanup_session(session)
     sys.exit(0)
 
@@ -1463,41 +1743,42 @@ def mode_hook(opts):
 # --------------------------------------------------------------------------- #
 
 
-def _current_session_guess():
-    """For a tmux keybind we don't have a session id; toggle the pane bound to
-    the current tmux window's other pane if we tracked one, else the newest."""
-    try:
-        panes = os.listdir(CACHE_DIR)
-    except Exception:
-        return None
-    panes = [p for p in panes if p.endswith(".pane")]
-    if not panes:
-        return None
-    panes.sort(key=lambda p: os.path.getmtime(os.path.join(CACHE_DIR, p)))
-    return panes[-1][:-5]
-
-
 def mode_toggle(opts):
-    session = opts.get("session") or _current_session_guess()
-    if not session:
+    """tmux keybind: hide / summon the frog for the CURRENT WINDOW.
+
+    Window-scoped, so the keybind means the same thing in every window — the
+    old version guessed at the most recently touched session in the whole cache
+    and so toggled a frog in some other window as often as not.
+
+    Keys off pane LIVENESS, not the mere presence of a record: after a
+    hand-killed pane the stale record used to make the first keypress a silent
+    no-op, so summoning him back took two presses.
+    """
+    win = opts.get("window") or _window_id()
+    if not _valid_win(win):
         sys.exit(0)
-    # Key off pane LIVENESS, not the mere presence of the .pane file: after a
-    # hand-killed pane (tmux kill-pane) the stale file used to make the first
-    # keypress a silent no-op, so summoning him back took two presses.
-    if _pane_alive(session):
-        _kill_pane(session)
-    else:
-        _kill_pane(session)          # clear any stale record first
-        _spawn_pane(session, opts.get("layout", DEFAULT_LAYOUT),
-                    opts.get("theme", DEFAULT_THEME))
+    with _win_lock(win):
+        live = _live_panes()
+        st = _prune_claims(_read_win(win), live)
+        if st.get("pane") in live:
+            _kill_win_pane(st)
+            st["pane"] = None
+        else:
+            session = st.get("active") or _newest_claim(st["sessions"]) or "default"
+            st["pane"] = _spawn_win_pane(
+                win, os.environ.get("TMUX_PANE"), session,
+                opts.get("layout", DEFAULT_LAYOUT),
+                opts.get("theme", DEFAULT_THEME))
+        _write_json(_win_path(win), st)
     sys.exit(0)
 
 
 def mode_pane(opts):
+    """Summon the frog into this window by hand (no Claude session required)."""
     session = opts.get("session") or "default"
     _write_json(_paths(session)[0], {"state": "idle", "turns": 0, "ts": time.time()})
-    _spawn_pane(session, opts.get("layout", DEFAULT_LAYOUT),
-                opts.get("theme", DEFAULT_THEME))
+    _win_claim(session, opts.get("layout", DEFAULT_LAYOUT),
+               opts.get("theme", DEFAULT_THEME))
     sys.exit(0)
 
 
@@ -1864,8 +2145,8 @@ def mode_resolve_theme(argv):
 
 def _parse(argv):
     mode = argv[0] if argv else "tap"
-    opts = {"session": None, "layout": None, "theme": None, "always": False,
-            "party": False, "event": None,
+    opts = {"session": None, "window": None, "layout": None, "theme": None,
+            "always": False, "party": False, "event": None,
             "settings": None, "statusline_mode": "tap", "rc": None,
             "minimal": False, "since": None}
     i = 1
@@ -1873,6 +2154,8 @@ def _parse(argv):
         a = argv[i]
         if a in ("--session", "-s"):
             i += 1; opts["session"] = argv[i]
+        elif a in ("--window", "-w"):
+            i += 1; opts["window"] = argv[i]
         elif a == "--layout":
             i += 1; opts["layout"] = argv[i]
         elif a == "--theme":
@@ -1900,6 +2183,8 @@ def _parse(argv):
         i += 1
     if opts["session"] is None:
         opts["session"] = os.environ.get("CLAUDE_FROG_SESSION")
+    if opts["window"] is not None and not _valid_win(opts["window"]):
+        opts["window"] = None
     if opts["layout"] is None:
         # env lets the hook and the tmux toggle keybind agree on a layout
         # without threading --layout through both call sites
@@ -1918,7 +2203,7 @@ def main():
     mode, opts = _parse(sys.argv[1:])
     try:
         if mode == "dance":
-            if not opts["session"]:
+            if not opts["session"] and not opts["window"]:
                 opts["session"] = "default"
             mode_dance(opts)
         elif mode in ("tap", "statusline"):

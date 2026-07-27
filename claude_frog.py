@@ -6,9 +6,10 @@ One file, standard library only. Two jobs:
   * `dance`       — the tmux-pane daemon: a smooth pixel frog who dances while
                     your turn is running and idles between turns.
   * `tap`         — the statusLine command: reads the token payload Claude Code
-                    hands the status bar, publishes the gauge for the pane, and
-                    prints nothing. (`statusline`, the old in-bar mood frog, is
-                    deprecated and now behaves exactly like `tap`.)
+                    hands the status bar and publishes the gauge for the pane.
+                    Prints nothing unless you set `config statusline frog`, in
+                    which case it also draws a one-line frog + context gauge.
+                    (`statusline` is the same mode under its older name.)
 
 He is also a gauge. The more context you've burned, the goofier he gets, and
 past ~150k tokens he starts to shake — an honest "you're deep in it, quality's
@@ -360,6 +361,17 @@ SETTINGS = {
         "show": lambda v: "on" if v else "off",
         "help": "sprout a diorama prop on every prompt",
     },
+    "statusline": {
+        "env": "CLAUDE_FROG_STATUSLINE",
+        # Default off: an upgrade must never start drawing in somebody's status
+        # bar unasked. The wizard offers it; this is the opt-in.
+        "default": "off",
+        "choices": ("off", "frog"),
+        "parse": lambda v: str(v).strip().lower()
+                 if str(v).strip().lower() in ("off", "frog") else None,
+        "show": str,
+        "help": "a one-line frog + context gauge in your status bar",
+    },
 }
 
 
@@ -461,6 +473,22 @@ _FROG_BACK_SRC = [
 # clearance either side, which is exactly the travel hip_shift needs at full
 # amplitude. Widen the cheeks and the shake clips against the sprite's edge.
 
+# The status-bar frog: 2px tall, which is EXACTLY one character row through the
+# half-block renderer — so he costs a single line no matter how cramped your bar
+# is. That's the whole design constraint. What survives at this size is a
+# silhouette: two glinting eyes over a wide grin, green cheeks either side. He
+# wears the session's theme and the same green->pink context fade as the pane
+# frog, so the two never disagree about how deep you are.
+# The mouth deliberately spans every eye column, so both pupils sit over the
+# same colour — at 11px wide an off-by-one there reads as a lopsided face.
+_MICRO_SRC = [
+    "OHWPHHHWPHO",   # eye bumps: specular glint + pupil, twice, lit from the left
+    "OBNNNNNNNBO",   # the grin, cheeks falling to body midtone either side
+]
+
+# Blink: the eyes squeeze shut to a dark line, same idea as the big frog's.
+_MICRO_BLINK = {0: "OHMMHHHMMHO"}
+
 Pixel = tuple  # (r, g, b) or None
 
 
@@ -472,6 +500,7 @@ def _load(src):
 
 FROG = _load(_FROG_SRC)
 FROG_BACK = _load(_FROG_BACK_SRC)
+MICRO = _load(_MICRO_SRC)
 
 
 def _apply_blink(grid, overlay):
@@ -1393,12 +1422,30 @@ def _extract_tokens(payload):
     return tot if got else None
 
 
+def _extract_window_size(payload):
+    """The session's context window size, if the payload says. Else None.
+
+    Only used for the "% full" readout — the frog's *mood* stays anchored in
+    absolute tokens (see PINK_FULL_TOKENS), because that's what actually tracks
+    when long-context quality softens, whatever size your window is.
+    """
+    cw = payload.get("context_window") or {}
+    for k in ("context_window_size", "context_window"):
+        try:
+            v = int(cw.get(k))
+            if v > 0:
+                return v
+        except (TypeError, ValueError):
+            pass
+    return None
+
+
 def _tap(payload=None):
     """Read the statusLine payload and publish the token gauge to session state.
 
     The statusLine is the only surface Claude Code hands token usage to — hooks
     are token-blind — so this is the sole source of the pane daemon's gauge.
-    Returns (session, tokens); tokens is None if the payload didn't carry any.
+    Returns (session, tokens, payload); tokens is None if the payload carried none.
     """
     if payload is None:
         try:
@@ -1406,6 +1453,8 @@ def _tap(payload=None):
             payload = json.loads(raw) if raw.strip() else {}
         except Exception:
             payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
 
     session = (payload.get("session_id") or payload.get("sessionId") or "default")
     try:
@@ -1415,21 +1464,93 @@ def _tap(payload=None):
 
     if tokens is not None:
         _write_json(_paths(session)[1], {"tokens": tokens, "ts": time.time()})
-    return session, tokens
+    return session, tokens, payload
+
+
+# --------------------------------------------------------------------------- #
+# The status-bar line                                                          #
+# --------------------------------------------------------------------------- #
+# Two channels, deliberately: the bar's LENGTH is how full your context window
+# is, and its COLOUR is how cooked Claude is (the same absolute-token fade the
+# pane frog wears). A 1M window at 200k reads "a fifth full, and he's gone
+# pink" — which is the honest summary, and one number couldn't say it.
+
+_BAR_CELLS = 8
+
+
+def _fmt_tokens(n):
+    if n is None:
+        return "–"
+    if n >= 10_000:
+        return f"{n // 1000}k"
+    if n >= 1_000:
+        return f"{n / 1000:.1f}k"
+    return str(n)
+
+
+def _gauge_bar(tokens, size, theme):
+    """The context bar: length = window fill, colour = the frog's current fade."""
+    pal = palette_for(tokens, theme)
+    fill_rgb = pal.get("B") or (0x9d, 0xc8, 0x3b)
+    dim_rgb = pal.get("S") or (0x3a, 0x4a, 0x28)
+    if tokens is None:
+        frac = 0.0
+    elif size:
+        frac = _clamp(tokens / float(size))
+    else:
+        # No window size in the payload: fall back to the mood ramp so the bar
+        # still means something rather than sitting empty.
+        frac = _clamp(tokens / float(PINK_FULL_TOKENS))
+    lit = int(round(frac * _BAR_CELLS))
+    out = []
+    for i in range(_BAR_CELLS):
+        r, g, b = fill_rgb if i < lit else dim_rgb
+        out.append(f"\033[38;2;{r};{g};{b}m" + ("▓" if i < lit else "░"))
+    return "".join(out) + _RESET
+
+
+def _statusline_text(session, tokens, size, theme):
+    """The whole bar as one line, no trailing newline (so it composes)."""
+    state, turns = _read_think(session)
+    active = state == "thinking"
+    # The bar is stateless — re-invoked on every refresh — so the pose comes off
+    # the wall clock rather than a counter we'd have to persist.
+    frame = int(time.time() * (FPS_ACTIVE if active else FPS_IDLE))
+    grid = MICRO
+    if (frame % 47) == 0:                    # an occasional blink
+        grid = _apply_blink(grid, _MICRO_BLINK)
+    spec = theme_spec(theme)
+    rows = render_pixels(_colorize(grid, palette_for(tokens, theme), spec["dither"]))
+    frog = (rows[0] if rows else "") + _RESET
+
+    parts = [frog, _gauge_bar(tokens, size, theme), _fmt_tokens(tokens)]
+    if size and tokens is not None:
+        parts.append(f"· {int(round(100.0 * tokens / size))}%")
+    line = " ".join(parts)
+    # Deep in the window he gets the shakes — one column of jitter, which is all
+    # a status bar can carry without turning into noise.
+    if shake_px(tokens) and random.random() < 0.5:
+        line = " " + line
+    return line
 
 
 def mode_tap():
-    """Feed the gauge, render nothing.
+    """Feed the pane's gauge, and draw the status-bar frog if you asked for one.
 
     The only surface Claude Code hands token usage to is the statusLine, so the
     dancing pane's goofiness / shake / pink fade all depend on this being wired
-    there. It prints nothing — your status bar stays yours (or empty).
-
-    The old `statusline` mode (a mood frog drawn in the status bar itself) is
-    deprecated: it now lands here too, so existing settings.json wirings keep
-    feeding the pane and simply stop drawing in the bar.
+    there. Whether anything is *drawn* is the `statusline` setting, not the mode
+    name — `tap` and `statusline` behave identically, so an existing wiring of
+    either keeps working and neither starts drawing until you opt in.
     """
-    _tap()
+    session, tokens, payload = _tap()
+    if _setting("statusline")[0] == "frog":
+        try:
+            sys.stdout.write(_statusline_text(
+                session, tokens, _extract_window_size(payload),
+                _setting("theme")[0]))
+        except Exception:
+            pass                # a broken frog must never break your prompt
     sys.exit(0)
 
 
@@ -1940,6 +2061,9 @@ def mode_preview(opts):
     print(f"\n--- {theme} render (ANSI; may show as blocks) ---")
     for line in render_pixels(_colorize(src, spec["base"], spec["dither"])):
         sys.stdout.write(line + _RESET + "\n")
+    print(f"\n--- {theme} status bar, fresh -> full window ---")
+    for tok in (0, 60_000, 120_000, 180_000):
+        sys.stdout.write(_statusline_text("preview", tok, 200_000, theme) + "\n")
     sys.exit(0)
 
 
@@ -2149,12 +2273,19 @@ def mode_setup(opts):
         flora = _ask(tty, "Sprout a diorama prop on every prompt?",
                      list(SETTINGS["flora"]["choices"]),
                      SETTINGS["flora"]["show"](_setting("flora", None, cfg)[0]))
+        statusline = _ask(
+            tty, "A one-line frog + context gauge in your status bar too?",
+            list(SETTINGS["statusline"]["choices"]),
+            _setting("statusline", None, cfg)[0],
+            lambda c: [_statusline_text("setup-preview", 78_000, 200_000, theme)]
+            if c == "frog" else ["(status bar left alone)"])
     finally:
         try:
             tty.close()
         except Exception:
             pass
-    cfg.update({"theme": theme, "layout": layout, "flora": flora})
+    cfg.update({"theme": theme, "layout": layout, "flora": flora,
+                "statusline": statusline})
     if not _write_config(cfg):
         sys.stderr.write(f"could not write {_config_path()}\n")
         sys.exit(1)

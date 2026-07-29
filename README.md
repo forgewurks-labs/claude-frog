@@ -77,6 +77,7 @@ The installer asks you once. After that, everything is one command:
 python3 ~/.claude-frog/claude_frog.py config                  # what he's using, and WHY
 python3 ~/.claude-frog/claude_frog.py config theme snes       # change it
 python3 ~/.claude-frog/claude_frog.py config statusline frog  # a frog in your status bar too
+python3 ~/.claude-frog/claude_frog.py config fade off         # stop the green→pink blush
 python3 ~/.claude-frog/claude_frog.py setup                   # run the wizard again
 ```
 
@@ -87,6 +88,7 @@ sounds:
   theme   terraria  from $CLAUDE_FROG_THEME
   layout  bottom    from ~/.config/claude-frog/config.json
   flora   on        default
+  fade    on        default
 ```
 
 Settings resolve **flag → `CLAUDE_FROG_*` env → config file → built-in default**.
@@ -226,7 +228,8 @@ Two channels, deliberately:
 
 A 1M window sitting at 200k reads "a fifth full, and he's gone pink," which is
 the honest summary; one number couldn't say it. He wears your theme, blinks
-occasionally, and gets the shakes past ~150k like his big brother.
+occasionally, and gets the shakes past ~150k like his big brother. (`config fade
+off` mutes the colour channel and leaves the length — see below.)
 
 Turning it on doesn't change *which* command you wire — `tap` and `statusline`
 behave identically, and neither draws anything until you opt in. So an existing
@@ -268,6 +271,22 @@ theme's actual fade, fresh → full window):
 | <img src="assets/frog-genesis.png" width="220" alt="Genesis frog"> | `genesis` | punchy, oversaturated Mega Drive palette with cross-hatch **dithering**, fading to hot magenta |
 | <img src="assets/frog-gba.png" width="220" alt="Game Boy frog"> | `gba` | the iconic 4-tone monochrome Game Boy LCD (pea-green), whose tint slides green→rose as context fills |
 | <img src="assets/frog-terraria.png" width="220" alt="Terraria frog"> | `terraria` | high-fidelity, warm & painterly indie look — a fuller earthy ramp with desaturated outlines and **dithered** midtones, fading to a warm rose |
+
+#### Prefer him one colour? `config fade off`
+
+```sh
+python3 claude_frog.py config fade off    # or CLAUDE_FROG_FADE=0 for one session
+```
+
+He then stays in his theme's own fresh palette forever — no blush, at any depth
+— and the **gauge moves entirely into his dancing**: still composed below ~40k,
+still unhinged by ~100k, still shaking past ~150k. Nothing about the ramps
+changes; you're switching off one of the two channels reporting them.
+
+The status bar follows the same rule: its length keeps tracking how full the
+window is, it just stops recolouring. Worth it if you're on a theme whose green
+you actually like, if pink-on-your-background is hard to read, or if a colour
+that drifts all session is more motion than you want in your peripheral vision.
 
 > Screenshots regenerate from the live palettes with `python3 assets/gen_screenshots.py`.
 > How the themes and the launcher work under the hood — and how to add a theme —

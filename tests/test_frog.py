@@ -32,6 +32,12 @@ _CACHE_TMP = tempfile.TemporaryDirectory(prefix="claude-frog-tests-")
 ENV = {**os.environ, "XDG_CACHE_HOME": _CACHE_TMP.name}
 
 
+def _fill_colour(bar):
+    """The SGR code the gauge bar paints its LIT cells with."""
+    lit = bar.index("▓")
+    return bar[bar.rindex("\033[", 0, lit):lit]
+
+
 class TestSprites(unittest.TestCase):
     def test_sprites_are_rectangular(self):
         for name, grid in (("FROG", cf.FROG), ("FROG_BACK", cf.FROG_BACK)):
@@ -191,6 +197,26 @@ class TestThemes(unittest.TestCase):
             # a genuine blend in between (not either endpoint)
             mid = cf.palette_for(cf.PINK_FULL_TOKENS // 2, name)["B"]
             self.assertNotIn(mid, (spec["base"]["B"], spec["pink"]["B"]))
+
+    def test_fade_off_pins_every_theme_to_its_base_palette(self):
+        # `config fade off`: the colour channel goes quiet at every depth,
+        # including the fully-pink mark and the party override's max value.
+        for name, spec in cf.THEMES.items():
+            for tok in (0, None, 60_000, cf.PINK_FULL_TOKENS, 10 ** 7):
+                self.assertIs(cf.palette_for(tok, name, False), spec["base"],
+                              f"{name} recoloured at {tok} tokens with fade off")
+
+    def test_fade_off_leaves_the_motion_ramps_alone(self):
+        # The whole point of the option: he still gets goofier and shakier as
+        # the window fills, he just stops blushing. Motion reads tokens
+        # directly and never consults the fade, so the two channels can't be
+        # wired together by accident later.
+        base = cf.THEMES[cf.DEFAULT_THEME]["base"]
+        calm, cooked = 10_000, 300_000
+        self.assertGreater(cf.goofiness(cooked, 0), cf.goofiness(calm, 0))
+        self.assertGreater(cf.shake_px(cooked), cf.shake_px(calm))
+        self.assertIs(cf.palette_for(calm, cf.DEFAULT_THEME, False), base)
+        self.assertIs(cf.palette_for(cooked, cf.DEFAULT_THEME, False), base)
 
     def test_unknown_theme_falls_back_to_default(self):
         self.assertIs(cf.theme_spec("bogus"), cf.THEMES[cf.DEFAULT_THEME])
@@ -464,6 +490,19 @@ class TestStatusBarFrog(unittest.TestCase):
         self.assertEqual(wide.count("▓"), 2, "bar ignored the real window size")
         self.assertEqual(narrow.count("▓"), 8)
 
+    def test_fade_off_keeps_the_bar_length_but_drops_the_colour(self):
+        # With the fade off the bar carries the fill on length alone — which is
+        # the readout it was always primarily making. Colour stops moving.
+        shallow = cf._gauge_bar(20_000, 200_000, "snes", False)
+        deep = cf._gauge_bar(180_000, 200_000, "snes", False)
+        self.assertEqual((shallow.count("▓"), deep.count("▓")), (1, 7),
+                         "the bar stopped tracking window fill")
+        self.assertEqual(_fill_colour(deep), _fill_colour(shallow))
+        # …and with it on, that same depth really does recolour, so the
+        # assertion above is measuring the setting and not a broken bar.
+        self.assertNotEqual(_fill_colour(cf._gauge_bar(180_000, 200_000, "snes")),
+                            _fill_colour(deep))
+
     def test_every_theme_renders(self):
         for theme in cf.THEMES:
             line = cf._statusline_text("t", 78_000, 200_000, theme)
@@ -573,6 +612,16 @@ class TestSettingsResolution(unittest.TestCase):
         self.assertEqual(cf._setting("flora"), (False, "config"))
         os.environ["CLAUDE_FROG_FLORA"] = "0"
         self.assertEqual(cf._setting("flora"), (False, "env"))
+
+    def test_fade_defaults_on_and_resolves_through_every_layer(self):
+        # On by default: an upgrade must not silently stop an existing frog
+        # from blushing. Then off from the file, and off for one session from
+        # the env — same ladder as every other knob.
+        self.assertEqual(cf._setting("fade"), (True, "default"))
+        cf._write_config({"fade": "off"})
+        self.assertEqual(cf._setting("fade"), (False, "config"))
+        os.environ["CLAUDE_FROG_FADE"] = "on"
+        self.assertEqual(cf._setting("fade"), (True, "env"))
 
     def test_unreadable_config_does_not_break_resolution(self):
         with open(cf._config_path(), "w") as f:

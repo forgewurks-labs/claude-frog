@@ -94,7 +94,7 @@ if [ "$UNINSTALL" = 1 ]; then
   python3 "$FROG" uninstall-settings
   # 3. the tmux keybind.
   python3 "$FROG" uninstall-keybind
-  # 4. your saved settings (theme/layout/flora).
+  # 4. your saved settings (theme/fade/layout/flora/statusline).
   CFG="$(python3 "$FROG" config-path 2>/dev/null || true)"
   if [ -n "$CFG" ] && [ -f "$CFG" ]; then
     rm -f "$CFG"

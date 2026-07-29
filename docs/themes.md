@@ -31,8 +31,14 @@ Everything reactive is a token-driven `0..1` scalar:
 - `goofiness(tokens, turns)` — scales hop height, sway, and how often "specials"
   fire.
 - `shake_px(tokens)` — pane-content jitter above a floor.
-- `pinkness(tokens)` / `palette_for(tokens, theme)` — the green→pink color fade,
-  fully pink by `PINK_FULL_TOKENS` (200k).
+- `pinkness(tokens)` / `palette_for(tokens, theme, fade)` — the green→pink color
+  fade, fully pink by `PINK_FULL_TOKENS` (200k). `fade=False` (the `fade`
+  setting, off) makes it the identity at every token count.
+
+The colour scalar is the only optional one. `palette_for` is the single choke
+point every coloured surface routes through — pane frog, status-bar micro frog,
+gauge bar — so that one flag is the whole opt-out, and the motion scalars above
+never consult it. Off, the gauge still reads; it just reads through movement.
 
 Tokens come **only** from the statusLine payload via `tap` — hooks are
 token-blind. A setup with no tap wired falls back to a turn-count ramp for
@@ -68,8 +74,8 @@ DEFAULT_THEME = "snes"
   sprites, while the brightest highlight and specular stay clean.
 
 Every theme keeps the green→pink **context gauge**: each carries a `base` (fresh)
-palette and a `pink` fade target, and `palette_for(tokens, theme)` blends between
-them (in HLS space, via `_blend`, so the fade stays vivid instead of sagging
+palette and a `pink` fade target, and `palette_for(tokens, theme, fade)` blends
+between them (in HLS space, via `_blend`, so the fade stays vivid instead of sagging
 through a muddy midpoint). For `gba` the gauge survives as a *tint* shift — the
 whole LCD slides from green toward rose — because eyes and mouth are in its
 `pink` map too.

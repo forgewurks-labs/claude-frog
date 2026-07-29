@@ -15,7 +15,8 @@ He is also a gauge. The more context you've burned, the goofier he gets, and
 past ~150k tokens he starts to shake — an honest "you're deep in it, quality's
 about to soften" tell. Calm below ~40k, mostly unhinged by ~100k, full chaos by
 ~120k. He also changes color: green when fresh, fading toward Claude pink as
-context fills, fully pink by 200k tokens.
+context fills, fully pink by 200k tokens — `config fade off` keeps him his
+theme's own green and leaves the dance and the shake to carry the gauge.
 
 He renders in four pixel-art styles — `snes` (default, smooth 16-bit shading),
 `genesis` (punchy, dithered Mega Drive), `gba` (4-tone monochrome Game Boy LCD),
@@ -57,7 +58,10 @@ SHAKE_MAX_PX = 3              # max jitter in pixels (kept subtle/readable)
 
 # Color fade: fresh green at 0 tokens, fully Claude pink at/above this. Linear in
 # between (see pinkness / palette_for). Starts from the very first token so the
-# blush is a continuous, always-on readout of how full the window is.
+# blush is a continuous, always-on readout of how full the window is. Turn the
+# colour channel off entirely with `config fade off` (see the SETTINGS table);
+# the goofiness and shake ramps above are independent of it, so the gauge
+# survives on motion alone.
 PINK_FULL_TOKENS = 200_000
 
 # Framerates.
@@ -360,6 +364,14 @@ SETTINGS = {
         "parse": _onoff,
         "show": lambda v: "on" if v else "off",
         "help": "sprout a diorama prop on every prompt",
+    },
+    "fade": {
+        "env": "CLAUDE_FROG_FADE",
+        "default": True,
+        "choices": ("on", "off"),
+        "parse": _onoff,
+        "show": lambda v: "on" if v else "off",
+        "help": "blush from green toward Claude pink as context fills",
     },
     "statusline": {
         "env": "CLAUDE_FROG_STATUSLINE",
@@ -772,7 +784,7 @@ def _blend(base, target, t):
     return int(round(r * 255)), int(round(g * 255)), int(round(b * 255))
 
 
-def palette_for(tokens, theme=DEFAULT_THEME):
+def palette_for(tokens, theme=DEFAULT_THEME, fade=True):
     """The theme's base palette blended toward its pink target by token usage.
 
     Returns the base (fresh) palette unchanged at zero tokens (or when tokens
@@ -780,10 +792,15 @@ def palette_for(tokens, theme=DEFAULT_THEME):
     fully faded palette at/above PINK_FULL_TOKENS, and a vivid HLS blend (see
     _blend) in between. Keys absent from the theme's pink target (e.g. the SNES
     eyes / mouth cream, transparent) pass through untouched.
+
+    `fade=False` (the `fade` setting, off) pins him to the base palette forever:
+    every colored surface routes through here, so that one flag is the whole
+    opt-out. The dance/shake ramps are untouched — they read tokens directly —
+    so the gauge still reads, just through motion alone.
     """
     spec = theme_spec(theme)
     base_palette, target_palette = spec["base"], spec["pink"]
-    t = pinkness(tokens)
+    t = pinkness(tokens) if fade else 0.0
     if t <= 0.0:
         return base_palette
     out = {}
@@ -1275,6 +1292,7 @@ def mode_dance(opts):
     out = sys.stdout
     chor = Choreographer()
     scene = Scene() if _setting("flora")[0] else None
+    fade = _setting("fade")[0]
     # Don't backfill props for turns that already happened before this pane
     # started (e.g. a mid-session toggle) — only sprout on prompts from here on.
     # The baseline comes from `--since` (captured in the spawning hook, before the
@@ -1328,8 +1346,10 @@ def mode_dance(opts):
             active = party or always or (state == "thinking")
             g = 1.0 if party else goofiness(tokens, turns)
             sk = shake_px(tokens) if not party else float(SHAKE_MAX_PX)
-            # party maxes everything, so blush him fully pink too
-            palette = palette_for(PINK_FULL_TOKENS if party else tokens, theme)
+            # party maxes everything, so blush him fully pink too — unless the
+            # fade is off, in which case nothing is allowed to recolor him.
+            palette = palette_for(PINK_FULL_TOKENS if party else tokens,
+                                  theme, fade)
 
             # self-exit once the state we exist for has vanished (last claimant
             # released the window, session ended and cleanup ran, or files were
@@ -1488,9 +1508,13 @@ def _fmt_tokens(n):
     return str(n)
 
 
-def _gauge_bar(tokens, size, theme):
-    """The context bar: length = window fill, colour = the frog's current fade."""
-    pal = palette_for(tokens, theme)
+def _gauge_bar(tokens, size, theme, fade=True):
+    """The context bar: length = window fill, colour = the frog's current fade.
+
+    With `fade` off the colour channel goes quiet and the bar carries the fill
+    on length alone — which is the readout the bar was always primarily making.
+    """
+    pal = palette_for(tokens, theme, fade)
     fill_rgb = pal.get("B") or (0x9d, 0xc8, 0x3b)
     dim_rgb = pal.get("S") or (0x3a, 0x4a, 0x28)
     if tokens is None:
@@ -1509,7 +1533,7 @@ def _gauge_bar(tokens, size, theme):
     return "".join(out) + _RESET
 
 
-def _statusline_text(session, tokens, size, theme):
+def _statusline_text(session, tokens, size, theme, fade=True):
     """The whole bar as one line, no trailing newline (so it composes)."""
     state, turns = _read_think(session)
     active = state == "thinking"
@@ -1520,10 +1544,11 @@ def _statusline_text(session, tokens, size, theme):
     if (frame % 47) == 0:                    # an occasional blink
         grid = _apply_blink(grid, _MICRO_BLINK)
     spec = theme_spec(theme)
-    rows = render_pixels(_colorize(grid, palette_for(tokens, theme), spec["dither"]))
+    rows = render_pixels(
+        _colorize(grid, palette_for(tokens, theme, fade), spec["dither"]))
     frog = (rows[0] if rows else "") + _RESET
 
-    parts = [frog, _gauge_bar(tokens, size, theme), _fmt_tokens(tokens)]
+    parts = [frog, _gauge_bar(tokens, size, theme, fade), _fmt_tokens(tokens)]
     if size and tokens is not None:
         parts.append(f"· {int(round(100.0 * tokens / size))}%")
     line = " ".join(parts)
@@ -1548,7 +1573,7 @@ def mode_tap():
         try:
             sys.stdout.write(_statusline_text(
                 session, tokens, _extract_window_size(payload),
-                _setting("theme")[0]))
+                _setting("theme")[0], _setting("fade")[0]))
         except Exception:
             pass                # a broken frog must never break your prompt
     sys.exit(0)
@@ -2061,9 +2086,12 @@ def mode_preview(opts):
     print(f"\n--- {theme} render (ANSI; may show as blocks) ---")
     for line in render_pixels(_colorize(src, spec["base"], spec["dither"])):
         sys.stdout.write(line + _RESET + "\n")
-    print(f"\n--- {theme} status bar, fresh -> full window ---")
+    fade = _setting("fade")[0]
+    print(f"\n--- {theme} status bar, fresh -> full window "
+          f"(fade {'on' if fade else 'off'}) ---")
     for tok in (0, 60_000, 120_000, 180_000):
-        sys.stdout.write(_statusline_text("preview", tok, 200_000, theme) + "\n")
+        sys.stdout.write(
+            _statusline_text("preview", tok, 200_000, theme, fade) + "\n")
     sys.exit(0)
 
 
@@ -2267,6 +2295,13 @@ def mode_setup(opts):
         cfg = _read_config()
         theme = _ask(tty, "Which style?", list(SETTINGS["theme"]["choices"]),
                      _setting("theme", None, cfg)[0], _theme_preview)
+        # Previewed deep in a window, where the two answers differ most: the
+        # same frog, blushing or not. Both still dance and shake by then.
+        fade = _ask(tty, "Should he blush toward Claude pink as context fills?",
+                    list(SETTINGS["fade"]["choices"]),
+                    SETTINGS["fade"]["show"](_setting("fade", None, cfg)[0]),
+                    lambda c: [_statusline_text("setup-preview", 170_000,
+                                                200_000, theme, c == "on")])
         layout = _ask(tty, "Where should his pane go?",
                       list(SETTINGS["layout"]["choices"]),
                       _setting("layout", None, cfg)[0])
@@ -2277,14 +2312,15 @@ def mode_setup(opts):
             tty, "A one-line frog + context gauge in your status bar too?",
             list(SETTINGS["statusline"]["choices"]),
             _setting("statusline", None, cfg)[0],
-            lambda c: [_statusline_text("setup-preview", 78_000, 200_000, theme)]
+            lambda c: [_statusline_text("setup-preview", 78_000, 200_000, theme,
+                                        fade == "on")]
             if c == "frog" else ["(status bar left alone)"])
     finally:
         try:
             tty.close()
         except Exception:
             pass
-    cfg.update({"theme": theme, "layout": layout, "flora": flora,
+    cfg.update({"theme": theme, "fade": fade, "layout": layout, "flora": flora,
                 "statusline": statusline})
     if not _write_config(cfg):
         sys.stderr.write(f"could not write {_config_path()}\n")

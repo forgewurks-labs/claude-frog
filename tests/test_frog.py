@@ -167,7 +167,8 @@ class TestTwerk(unittest.TestCase):
                         "the pivot never squeezes edge-on")
 
     def test_twerk_gets_bolder_with_goofiness(self):
-        peak = lambda g: max(abs(f["hips"]) for f in self.frames(g))
+        def peak(g):
+            return max(abs(f["hips"]) for f in self.frames(g))
         self.assertGreater(peak(1.0), peak(0.0))
 
 
@@ -712,7 +713,7 @@ class TestKeybindInstall(unittest.TestCase):
             return f.read()
 
     def _binds(self):
-        return [l for l in self._read().splitlines() if "claude_frog.py" in l]
+        return [ln for ln in self._read().splitlines() if "claude_frog.py" in ln]
 
     def test_installs_once_and_is_idempotent(self):
         self.assertTrue(cf.install_keybind(self.conf)[0])
@@ -1279,6 +1280,46 @@ class TestDoctor(unittest.TestCase):
         r = self._run(settings, rc)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("your own statusLine", r.stdout)
+
+    def test_generated_commands_use_this_interpreter(self):
+        # settings.json wiring and the tmux keybind must run on the same
+        # interpreter that installed them — a pipx venv has no `python3` on
+        # PATH, and PATH inside tmux/hooks differs from the install shell.
+        self.assertIn(sys.executable, cf._frog_cmd("tap"))
+        self.assertIn(sys.executable, cf._keybind_line())
+
+    def _run_env(self, extra_env, d):
+        rc = os.path.join(d, "rc"); open(rc, "w").close()
+        return subprocess.run(
+            [sys.executable, SCRIPT, "doctor",
+             "--settings", os.path.join(d, "settings.json"), "--rc", rc],
+            capture_output=True, text=True, timeout=15,
+            env={**ENV, **extra_env})
+
+    def test_names_terminal_requirements(self):
+        # truecolor, NO_COLOR, and the half-block glyphs are requirements the
+        # renderer can't degrade around — doctor must at least name them.
+        r = self._run_env({"NO_COLOR": "1", "COLORTERM": ""}, self._tmp_dir())
+        self.assertIn("Truecolor", r.stdout)
+        self.assertIn("NO_COLOR", r.stdout)
+        self.assertIn("Half-blocks", r.stdout)
+
+    def test_terminal_notes_never_fail_the_checkup(self):
+        # a hostile terminal warns but is non-critical: fully wired ⇒ exit 0.
+        d = self._tmp_dir()
+        settings = os.path.join(d, "settings.json")
+        subprocess.run([sys.executable, SCRIPT, "install-settings",
+                        "--settings", settings], capture_output=True,
+                       timeout=15, env=ENV)
+        rc = os.path.join(d, "rc")
+        with open(rc, "w") as f:
+            f.write(f"# {cf.MARKER}\nsource whatever\n")
+        r = subprocess.run(
+            [sys.executable, SCRIPT, "doctor", "--settings", settings,
+             "--rc", rc],
+            capture_output=True, text=True, timeout=15,
+            env={**ENV, "NO_COLOR": "1", "COLORTERM": "dumb"})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
 
 class TestEnvironment(unittest.TestCase):

@@ -1770,6 +1770,18 @@ def _reap_legacy_panes(win):
     return killed
 
 
+def _python():
+    """The interpreter baked into every generated command string.
+
+    sys.executable, so the pane daemon, settings.json wiring, and the tmux
+    keybind all run on the same interpreter that installed them — including a
+    pipx venv, where a bare `python3` from PATH would be a different Python
+    (or missing). PATH `python3` only as a last resort (sys.executable can be
+    empty in odd embeddings).
+    """
+    return sys.executable or "python3"
+
+
 def _spawn_win_pane(win, near, session, layout=DEFAULT_LAYOUT,
                     theme=DEFAULT_THEME):
     """Split a frog pane into `win` and return its pane id (None if it failed).
@@ -1779,7 +1791,7 @@ def _spawn_win_pane(win, near, session, layout=DEFAULT_LAYOUT,
     beside whatever the window happened to have focused).
     """
     import shlex
-    py = sys.executable or "python3"
+    py = _python()
     here = os.path.abspath(__file__)
     # theme is baked into the daemon's command so it stays fixed for the life of
     # the pane, even if the env changes later in the session.
@@ -2348,7 +2360,7 @@ def _tmux_conf_path():
 
 
 def _keybind_line():
-    return f'bind F run-shell "python3 {os.path.abspath(__file__)} toggle"'
+    return f'bind F run-shell "{_python()} {os.path.abspath(__file__)} toggle"'
 
 
 def _is_frog_bind(line):
@@ -2368,7 +2380,7 @@ def _keybind_installed(path=None):
             text = f.read()
     except Exception:
         return False
-    return TMUX_MARKER in text or any(_is_frog_bind(l) for l in text.splitlines())
+    return TMUX_MARKER in text or any(_is_frog_bind(ln) for ln in text.splitlines())
 
 
 def install_keybind(path=None):
@@ -2476,7 +2488,7 @@ def mode_uninstall_keybind(opts):
 
 def _frog_cmd(kind):
     """The command string baked into settings.json for `kind` (hook/tap)."""
-    return f"python3 {os.path.abspath(__file__)} {kind}"
+    return f"{_python()} {os.path.abspath(__file__)} {kind}"
 
 
 def _is_frog_cmd(cmd):
@@ -2679,9 +2691,10 @@ def mode_uninstall_settings(opts):
 def mode_doctor(opts):
     """A green/amber checkup so a first-timer KNOWS it worked.
 
-    Verifies the five things that make the frog appear — python3, the launcher
-    line, the token-feed (tap) wiring, the dance hooks, a resolvable theme —
-    plus a non-critical note on tmux (where the frog actually lives). Exits
+    Verifies the five things that make the frog appear — python3 (3.9+), the
+    launcher line, the token-feed (tap) wiring, the dance hooks, a resolvable
+    theme — plus non-critical notes on the terminal (truecolor, NO_COLOR,
+    UTF-8 half-blocks) and on tmux (where the frog actually lives). Exits
     non-zero only if a *critical* piece is missing, so callers can gate on it;
     the tmux note never fails the check.
     """
@@ -2690,7 +2703,10 @@ def mode_doctor(opts):
     R = "\033[0m"
     rows = []       # (label, ok, critical, detail)
 
-    rows.append(("Python 3", True, True, "%d.%d.%d" % sys.version_info[:3]))
+    py_ok = sys.version_info >= (3, 9)
+    rows.append(("Python 3", py_ok, True,
+                 "%d.%d.%d" % sys.version_info[:3]
+                 + ("" if py_ok else " — below the declared floor (3.9+)")))
 
     # Launcher line in a shell rc (use --rc if the installer told us which one).
     rc = opts.get("rc")
@@ -2768,6 +2784,26 @@ def mode_doctor(opts):
                      f"{shown}  ({note})"
                      + (" — this is overriding your settings file" if shadowed else "")))
 
+    # Terminal requirements, declared honestly: the palettes emit 24-bit
+    # escapes with no 256-color fallback, and the frog is drawn in Unicode
+    # half-blocks — so these are requirements, not niceties.
+    colorterm = os.environ.get("COLORTERM", "")
+    truecolor = colorterm.lower() in ("truecolor", "24bit")
+    rows.append(("Truecolor", truecolor, False,
+                 f"COLORTERM={colorterm}" if truecolor else
+                 "COLORTERM isn't truecolor/24bit — the frog paints 24-bit "
+                 "color with no 256-color fallback, so his palette may come "
+                 "out wrong (use WezTerm, iTerm2, or Kitty)"))
+    if os.environ.get("NO_COLOR"):
+        rows.append(("NO_COLOR", False, False,
+                     "set, but the frog doesn't honor it — he renders in "
+                     "color anyway"))
+    enc_utf8 = "utf8" in (sys.stdout.encoding or "").lower().replace("-", "")
+    rows.append(("Half-blocks (▀▄)", enc_utf8, False,
+                 "UTF-8 out — just make sure your font draws ▀/▄" if enc_utf8
+                 else f"stdout encoding is {sys.stdout.encoding or 'unknown'}, "
+                      "not UTF-8 — the frog is drawn in ▀/▄ half-blocks"))
+
     in_tmux = bool(os.environ.get("TMUX"))
     rows.append(("Dancing pane (tmux)", in_tmux, False,
                  "in tmux — you get the full show" if in_tmux
@@ -2802,7 +2838,7 @@ def mode_doctor(opts):
               + "  Open a NEW terminal (or `source` your rc), then:  claude SEGA")
     else:
         print(C_WARN + "Some things need attention" + R
-              + " — fix the ⚠️  above, then re-run:  python3 "
+              + f" — fix the ⚠️  above, then re-run:  {_python()} "
               + f"{os.path.abspath(__file__)} doctor")
     sys.exit(0 if crit_ok else 1)
 

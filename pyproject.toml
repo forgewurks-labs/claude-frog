@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "claude-frog"
+version = "0.1.0"
+description = "A pixel frog that dances in a tmux pane while Claude Code thinks — and an honest context/token gauge."
+readme = "README.md"
+license = { file = "LICENSE" }
+authors = [{ name = "Robert Callaham" }]
+# Floor matches the oldest interpreter CI actually tests (see .github/workflows/ci.yml).
+requires-python = ">=3.9"
+classifiers = [
+    "Environment :: Console",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Topic :: Terminals",
+]
+
+[project.urls]
+Homepage = "https://github.com/forgewurks-labs/claude-frog"
+
+[project.scripts]
+claude-frog = "claude_frog:main"
+
+[tool.setuptools]
+# The whole frog is one stdlib-only module (see AGENTS.md) — packaged as-is.
+py-modules = ["claude_frog"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+# Correctness-focused gate: pyflakes + pycodestyle. E701/E702 are excluded
+# because the compact `flag; value` style in the arg parser is deliberate.
+select = ["E", "F", "W"]
+ignore = ["E701", "E702"]

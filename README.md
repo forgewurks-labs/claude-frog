@@ -18,9 +18,13 @@ It's a self-inflicted CPU tax. That's the point. He's worth it.
 
 ## Get started (one command)
 
-**You need:** `python3` (3.x, already on macOS/Linux), a truecolor terminal
-(WezTerm, iTerm2, Kitty), and **tmux** — the frog dances in a dedicated tmux
-pane, so that's where you'll see him. `git` too, for the one-liner.
+**You need:** macOS, Linux, or WSL (native Windows isn't supported), `python3`
+**3.9 or newer** (macOS and most Linux distros ship one), **tmux** — a hard
+requirement: the frog dances in a dedicated tmux pane, no tmux means no frog —
+and a **truecolor** terminal (WezTerm, iTerm2, Kitty) with a font that draws
+the `▀`/`▄` half-block glyphs. There's no 256-color fallback, and `NO_COLOR`
+isn't honored — `doctor` (below) checks all of this. `git` too, for the
+one-liner.
 
 ### 1. Install
 
@@ -45,6 +49,17 @@ git clone https://github.com/forgewurks-labs/claude-frog.git ~/.claude-frog
 
 Not in tmux? The wiring still installs cleanly, but the frog only appears in
 his tmux pane — add tmux + WezTerm any time for the show.
+
+Prefer a package manager? The repo is pip-installable:
+
+```sh
+pipx install git+https://github.com/forgewurks-labs/claude-frog
+```
+
+That puts a `claude-frog` command on your PATH — `claude-frog doctor`,
+`claude-frog install-settings`, `claude-frog install-keybind`, and friends —
+but not the `claude <THEME>` shell launcher, which ships with the installer
+above.
 
 ### 2. Activate (the one unavoidable step)
 

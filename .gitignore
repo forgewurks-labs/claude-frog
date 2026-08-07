@@ -3,3 +3,8 @@ __pycache__/
 .venv/
 # agent worktrees (transient, hold their own commits)
 .claude/worktrees/
+
+# org standards base — GENERATED per session by machine/claude/hooks/sync-base.sh
+# from a reviewed ref, never committed (platform ADR-0011 §3). Root-anchored so it
+# does NOT match the tracked source at standards/STANDARDS.base.md.
+/STANDARDS.base.md

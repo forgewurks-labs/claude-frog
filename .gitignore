@@ -1,5 +1,8 @@
 __pycache__/
 *.pyc
 .venv/
+.DS_Store
+# per-machine agent settings
+.claude/settings.local.json
 # agent worktrees (transient, hold their own commits)
 .claude/worktrees/

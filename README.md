@@ -417,3 +417,7 @@ See [`install/statusline-compose.sh`](install/statusline-compose.sh) for a small
 wrapper that taps the frog and then renders your bar on the same line. With the
 status-bar frog off (the default) it's invisible; with it on you get
 `🐸 ▓▓▓▓▓░░░ 78k · 39%  <your bar>`.
+
+## License
+
+[MIT](LICENSE) — do whatever makes you happy; the frog just wants to dance.

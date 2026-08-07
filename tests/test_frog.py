@@ -1089,6 +1089,74 @@ class TestCliModesExitZero(unittest.TestCase):
             self.assertEqual(r.returncode, 0, f"hook <- {p!r}: {r.stderr}")
 
 
+class TestAgentAdapter(unittest.TestCase):
+    """The adapter seam: everything agent-specific answers through ADAPTER."""
+
+    def test_registry_holds_the_default_and_detection_lands_on_one(self):
+        self.assertIn(cf.DEFAULT_AGENT, cf.ADAPTERS)
+        self.assertIsInstance(cf.detect_agent(), cf.AgentAdapter)
+        self.assertIsInstance(cf.ADAPTER, cf.AgentAdapter)
+
+    def test_hook_events_reexport_is_the_adapters_list(self):
+        # The historical module-level name must stay identical to the Claude
+        # Code adapter's list — installer, uninstaller, and doctor all key on it.
+        self.assertEqual(cf.FROG_HOOK_EVENTS, cf.ClaudeCodeAdapter.HOOK_EVENTS)
+
+    def test_every_wired_event_maps_to_a_canonical_lifecycle_event(self):
+        a = cf.ClaudeCodeAdapter()
+        canon = {"session-start", "prompt", "stop", "session-end"}
+        for ev in a.HOOK_EVENTS:
+            self.assertIn(a.canonical_event(ev), canon,
+                          f"{ev} maps to nothing mode_hook dispatches on")
+        # All four moments are reachable — a frog that can never end a session
+        # (or never start one) leaks panes.
+        self.assertEqual({a.canonical_event(ev) for ev in a.HOOK_EVENTS}, canon)
+
+    def test_cleanup_is_a_session_end_synonym_and_junk_maps_to_none(self):
+        a = cf.ClaudeCodeAdapter()
+        self.assertEqual(a.canonical_event("Cleanup"), "session-end")
+        self.assertIsNone(a.canonical_event("SomeFutureEvent"))
+        self.assertIsNone(a.canonical_event(""))
+
+    def test_session_id_reads_both_spellings_and_never_raises_on_junk(self):
+        a = cf.ClaudeCodeAdapter()
+        self.assertEqual(a.session_id({"session_id": "x"}), "x")
+        self.assertEqual(a.session_id({"sessionId": "y"}), "y")
+        self.assertIsNone(a.session_id({}))
+
+    def test_settings_path_honors_override_then_config_dir_env(self):
+        a = cf.ClaudeCodeAdapter()
+        self.assertEqual(a.settings_path("/tmp/x.json"), "/tmp/x.json")
+        old = os.environ.get("CLAUDE_CONFIG_DIR")
+        os.environ["CLAUDE_CONFIG_DIR"] = "/tmp/frog-conf"
+        try:
+            self.assertEqual(a.settings_path(),
+                             os.path.join("/tmp/frog-conf", "settings.json"))
+        finally:
+            if old is None:
+                del os.environ["CLAUDE_CONFIG_DIR"]
+            else:
+                os.environ["CLAUDE_CONFIG_DIR"] = old
+
+    def test_install_then_uninstall_wiring_round_trips_parsed_settings(self):
+        a = cf.ClaudeCodeAdapter()
+        data = {"model": "opus"}
+        changed, _notes = a.install_wiring(
+            data, tap_cmd=cf._frog_cmd("tap"), hook_cmd=cf._frog_cmd("hook"),
+            is_ours=cf._is_frog_cmd)
+        self.assertTrue(changed)
+        self.assertTrue(cf._is_frog_cmd(data["statusLine"]["command"]))
+        removed = a.uninstall_wiring(data, is_ours=cf._is_frog_cmd)
+        self.assertTrue(removed)
+        self.assertEqual(data, {"model": "opus"})
+
+    def test_install_wiring_raises_on_a_hooks_shape_it_cannot_merge_into(self):
+        a = cf.ClaudeCodeAdapter()
+        with self.assertRaises(ValueError):
+            a.install_wiring({"hooks": "nope"}, tap_cmd="t", hook_cmd="h",
+                             is_ours=cf._is_frog_cmd)
+
+
 class TestInstallSettings(unittest.TestCase):
     """`install-settings` must merge into settings.json without clobbering."""
 

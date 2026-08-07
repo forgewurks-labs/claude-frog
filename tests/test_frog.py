@@ -949,6 +949,39 @@ class TestWindowSingleton(_WindowCase):
         hook("SessionEnd", "sess-b")
         self.assertEqual(len(self._frogs()), 0, "the frog outlived its last session")
 
+    def test_opencode_native_events_drive_the_same_window_lifecycle(self):
+        # The full dance through the opencode adapter: native bus-event
+        # payloads (the shapes the generated plugin pipes in) claim the
+        # window's frog, count turns, and release the claim — proof the seam
+        # carries a whole second agent without mode_hook knowing.
+        import io
+
+        def hook(payload):
+            saved = sys.stdin
+            sys.stdin = io.StringIO(json.dumps(payload))
+            try:
+                with self.assertRaises(SystemExit):
+                    cf.mode_hook({})
+            finally:
+                sys.stdin = saved
+
+        old = cf.ADAPTER
+        cf.ADAPTER = cf.ADAPTERS["opencode"]
+        self.addCleanup(setattr, cf, "ADAPTER", old)
+
+        hook({"type": "session.created",
+              "properties": {"info": {"id": "oc-sess"}}})
+        self.assertEqual(len(self._frogs()), 1, "session.created spawned no frog")
+        hook({"type": "chat.message", "properties": {"sessionID": "oc-sess"}})
+        state, turns = cf._read_think("oc-sess")
+        self.assertEqual((state, turns), ("thinking", 1))
+        hook({"type": "session.idle", "properties": {"sessionID": "oc-sess"}})
+        state, turns = cf._read_think("oc-sess")
+        self.assertEqual((state, turns), ("idle", 1))
+        hook({"type": "session.deleted",
+              "properties": {"info": {"id": "oc-sess"}}})
+        self.assertEqual(len(self._frogs()), 0, "the claim wasn't released")
+
     # -- the daemon is told which window it serves ------------------------- #
 
     def test_spawned_daemon_is_window_scoped(self):
@@ -1155,6 +1188,273 @@ class TestAgentAdapter(unittest.TestCase):
         with self.assertRaises(ValueError):
             a.install_wiring({"hooks": "nope"}, tap_cmd="t", hook_cmd="h",
                              is_ours=cf._is_frog_cmd)
+
+
+class TestOpencodeAdapter(unittest.TestCase):
+    """Adapter #2: opencode — the seam's first consumer beyond Claude Code.
+
+    Its wiring artifact is a generated JS plugin file the frog owns outright,
+    so the surgery here is generate / compare / remove, never merge.
+    """
+
+    TAP_CMD = "python3 /x/claude_frog.py tap --agent opencode"
+    HOOK_CMD = "python3 /x/claude_frog.py hook --agent opencode"
+
+    def setUp(self):
+        self.a = cf.OpencodeAdapter()
+
+    def _installed(self):
+        data = self.a.parse_settings(None)
+        changed, notes = self.a.install_wiring(
+            data, tap_cmd=self.TAP_CMD, hook_cmd=self.HOOK_CMD,
+            is_ours=cf._is_frog_cmd)
+        return data, changed, notes
+
+    # ------------------------------------------------------------- events --
+
+    def test_every_wired_event_maps_to_a_canonical_lifecycle_event(self):
+        canon = {"session-start", "prompt", "stop", "session-end"}
+        self.assertEqual(
+            {self.a.canonical_event(ev) for ev in self.a.HOOK_EVENTS}, canon)
+
+    def test_unwired_bus_events_map_to_none(self):
+        for name in ("message.part.updated", "session.updated", ""):
+            self.assertIsNone(self.a.canonical_event(name), name)
+
+    def test_hook_event_reads_the_bus_event_type(self):
+        self.assertEqual(self.a.hook_event({"type": "session.idle"}),
+                         "session.idle")
+        self.assertEqual(self.a.hook_event({}), "")
+
+    def test_session_id_reads_every_payload_shape(self):
+        # tap payloads: top-level; bus events: properties.sessionID or
+        # properties.info.{id,sessionID} depending on the event family.
+        self.assertEqual(self.a.session_id({"sessionID": "s1"}), "s1")
+        self.assertEqual(self.a.session_id(
+            {"type": "session.idle", "properties": {"sessionID": "s2"}}), "s2")
+        self.assertEqual(self.a.session_id(
+            {"type": "session.created",
+             "properties": {"info": {"id": "s3"}}}), "s3")
+        self.assertEqual(self.a.session_id(
+            {"type": "message.updated",
+             "properties": {"info": {"sessionID": "s4"}}}), "s4")
+        self.assertIsNone(self.a.session_id({}))
+        self.assertIsNone(self.a.session_id({"properties": "junk"}))
+
+    # ------------------------------------------------------------- tokens --
+
+    def test_tokens_sum_input_and_both_cache_sides_not_output(self):
+        p = {"sessionID": "s",
+             "tokens": {"input": 1_000, "output": 400, "reasoning": 7,
+                        "cache": {"read": 110_000, "write": 9_000}}}
+        self.assertEqual(self.a.extract_tokens(p), 120_000)
+
+    def test_tokens_also_read_from_a_raw_message_updated_event(self):
+        p = {"type": "message.updated",
+             "properties": {"info": {"role": "assistant",
+                                     "tokens": {"input": 5,
+                                                "cache": {"read": 10}}}}}
+        self.assertEqual(self.a.extract_tokens(p), 15)
+
+    def test_token_schema_drift_degrades_to_none_not_a_crash(self):
+        for p in ({}, {"tokens": "nope"}, {"tokens": {"cache": "x"}},
+                  {"tokens": {"input": "many", "cache": {}}},
+                  {"properties": {"info": {"tokens": None}}},
+                  {"properties": "junk"}):
+            self.assertIsNone(self.a.extract_tokens(p), p)
+
+    def test_none_tokens_leave_the_gauge_on_the_turn_count_ramp(self):
+        # The honest degraded mode the issue asks for: no token feed means
+        # goofiness ramps on turns (FALLBACK_UNHINGED_TURNS) and he stays
+        # green — not a crash, not a fake reading.
+        self.assertEqual(cf.goofiness(None, 0), 0.0)
+        self.assertEqual(cf.goofiness(None, cf.FALLBACK_UNHINGED_TURNS), 1.0)
+        self.assertEqual(cf.pinkness(None), 0.0)
+
+    def test_window_size_reads_the_models_context_limit(self):
+        self.assertEqual(
+            self.a.extract_window_size({"limit": {"context": 200_000}}),
+            200_000)
+        for p in ({}, {"limit": {}}, {"limit": {"context": "big"}},
+                  {"limit": 0}, {"limit": {"context": None}}):
+            self.assertIsNone(self.a.extract_window_size(p), p)
+
+    # -------------------------------------------------- the plugin artifact --
+
+    def test_settings_path_honors_override_then_joins_an_existing_dir(self):
+        self.assertEqual(self.a.settings_path("/tmp/p.js"), "/tmp/p.js")
+        import shutil
+        d = tempfile.mkdtemp()
+        self.addCleanup(lambda: shutil.rmtree(d, ignore_errors=True))
+        old = os.environ.get("OPENCODE_CONFIG_DIR")
+        os.environ["OPENCODE_CONFIG_DIR"] = d
+        try:
+            self.assertEqual(self.a.settings_path(),
+                             os.path.join(d, "plugin", "claude-frog.js"))
+            # opencode globs both spellings; an existing dir is joined, not
+            # second-guessed with a second sibling
+            os.makedirs(os.path.join(d, "plugins"))
+            self.assertEqual(self.a.settings_path(),
+                             os.path.join(d, "plugins", "claude-frog.js"))
+        finally:
+            if old is None:
+                del os.environ["OPENCODE_CONFIG_DIR"]
+            else:
+                os.environ["OPENCODE_CONFIG_DIR"] = old
+
+    def test_install_generates_a_marked_plugin_with_the_agent_pinned(self):
+        data, changed, _notes = self._installed()
+        self.assertTrue(changed)
+        text = self.a.serialize_settings(data)
+        self.assertIn(self.a.MARKER, text)
+        self.assertTrue(cf._is_frog_cmd(text))
+        # the baked argv must carry --agent opencode: the wired invocation has
+        # to land on this adapter no matter what detection would say
+        self.assertIn('"--agent", "opencode"', text)
+        # both doorways are bridged
+        for ev in self.a.HOOK_EVENTS:
+            self.assertIn(ev, text)
+        self.assertIn("message.updated", text)      # the token feed
+
+    def test_install_is_idempotent_and_uninstall_means_remove_the_file(self):
+        data, _, _ = self._installed()
+        again, _notes = self.a.install_wiring(
+            data, tap_cmd=self.TAP_CMD, hook_cmd=self.HOOK_CMD,
+            is_ours=cf._is_frog_cmd)
+        self.assertEqual(again, [])
+        removed = self.a.uninstall_wiring(data, is_ours=cf._is_frog_cmd)
+        self.assertTrue(removed)
+        self.assertIsNone(self.a.serialize_settings(data))
+
+    def test_a_stale_plugin_is_refreshed_not_duplicated(self):
+        data = self.a.parse_settings(
+            f"// {self.a.MARKER} — old\nconst HOOK=[\"python3\", "
+            "\"/old/claude_frog.py\", \"hook\"];\n")
+        changed, _ = self.a.install_wiring(
+            data, tap_cmd=self.TAP_CMD, hook_cmd=self.HOOK_CMD,
+            is_ours=cf._is_frog_cmd)
+        self.assertTrue(changed)
+        self.assertIn("/x/claude_frog.py", data["text"])
+        self.assertNotIn("/old/claude_frog.py", data["text"])
+
+    def test_a_foreign_file_at_our_path_is_refused_not_clobbered(self):
+        foreign = "export const Mine = async () => ({});\n"
+        data = self.a.parse_settings(foreign)
+        with self.assertRaises(ValueError):
+            self.a.install_wiring(data, tap_cmd=self.TAP_CMD,
+                                  hook_cmd=self.HOOK_CMD,
+                                  is_ours=cf._is_frog_cmd)
+        self.assertEqual(
+            self.a.uninstall_wiring(data, is_ours=cf._is_frog_cmd), [])
+        self.assertEqual(data["text"], foreign)
+
+    def test_wiring_status_stands_and_falls_as_one_plugin(self):
+        empty = self.a.parse_settings(None)
+        self.assertEqual(self.a.wiring_status(empty, cf._is_frog_cmd),
+                         (False, False, False))
+        data, _, _ = self._installed()
+        self.assertEqual(self.a.wiring_status(data, cf._is_frog_cmd),
+                         (True, False, True))
+
+    def test_generated_plugin_wraps_every_handler_against_throwing(self):
+        # never-crash extends into Bun: a hook that throws can disrupt the
+        # user's opencode turn, so each of the five handlers guards itself.
+        data, _, _ = self._installed()
+        text = data["text"]
+        self.assertEqual(text.count("try {"), text.count("} catch {}"))
+        self.assertGreaterEqual(text.count("try {"), 5)
+
+
+class TestOpencodeCli(unittest.TestCase):
+    """install / uninstall / doctor / tap, end to end with --agent opencode."""
+
+    def _tmp_dir(self):
+        import shutil
+        d = tempfile.mkdtemp()
+        self.addCleanup(lambda: shutil.rmtree(d, ignore_errors=True))
+        return d
+
+    def _run(self, *argv, env=None):
+        return subprocess.run(
+            [sys.executable, SCRIPT, *argv],
+            capture_output=True, text=True, timeout=15, env=env or ENV)
+
+    def test_install_writes_uninstall_removes_the_plugin_file(self):
+        p = os.path.join(self._tmp_dir(), "claude-frog.js")
+        r = self._run("install-settings", "--agent", "opencode",
+                      "--settings", p)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        with open(p) as f:
+            self.assertIn(cf.OpencodeAdapter.MARKER, f.read())
+        r = self._run("install-settings", "--agent", "opencode",
+                      "--settings", p)
+        self.assertIn("nothing to change", r.stdout)      # idempotent
+        r = self._run("uninstall-settings", "--agent", "opencode",
+                      "--settings", p)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertFalse(os.path.exists(p))               # the file goes away
+        self.assertTrue(os.path.exists(p + ".bak"))       # but is backed up
+
+    def test_install_refuses_a_foreign_plugin_file(self):
+        p = os.path.join(self._tmp_dir(), "claude-frog.js")
+        foreign = "export const Mine = async () => ({});\n"
+        with open(p, "w") as f:
+            f.write(foreign)
+        r = self._run("install-settings", "--agent", "opencode",
+                      "--settings", p)
+        self.assertEqual(r.returncode, 1)
+        with open(p) as f:
+            self.assertEqual(f.read(), foreign)           # untouched
+
+    def test_doctor_judges_opencode_wiring_without_the_shell_launcher(self):
+        d = self._tmp_dir()
+        p = os.path.join(d, "claude-frog.js")
+        rc = os.path.join(d, "rc")
+        open(rc, "w").close()                              # no launcher line
+        r = self._run("doctor", "--agent", "opencode", "--settings", p,
+                      "--rc", rc)
+        self.assertEqual(r.returncode, 1)                  # not wired yet
+        self._run("install-settings", "--agent", "opencode", "--settings", p)
+        r = self._run("doctor", "--agent", "opencode", "--settings", p,
+                      "--rc", rc)
+        # fully wired: passes with no rc launcher — opencode has none
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("n/a for opencode", r.stdout)
+
+    def test_unknown_agent_errors_loudly_on_explicit_modes_only(self):
+        r = self._run("install-settings", "--agent", "bogus",
+                      "--settings", "/tmp/nope")
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("unknown agent", r.stderr)
+        # ...but the never-crash paths fall back to detection and exit 0
+        r = subprocess.run(
+            [sys.executable, SCRIPT, "hook", "--agent", "bogus"],
+            input="{}", capture_output=True, text=True, timeout=15, env=ENV)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_tap_with_an_opencode_payload_feeds_the_gauge(self):
+        payload = json.dumps({
+            "sessionID": "octap",
+            "tokens": {"input": 2_000, "output": 500,
+                       "cache": {"read": 40_000, "write": 3_000}},
+            "limit": {"context": 200_000},
+        })
+        r = subprocess.run(
+            [sys.executable, SCRIPT, "tap", "--agent", "opencode"],
+            input=payload, capture_output=True, text=True, timeout=15, env=ENV)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        ctx = os.path.join(_CACHE_TMP.name, "claude-frog", "octap.ctx")
+        with open(ctx) as f:
+            self.assertEqual(json.load(f)["tokens"], 45_000)
+
+    def test_tap_junk_payload_still_exits_zero_and_writes_nothing(self):
+        r = subprocess.run(
+            [sys.executable, SCRIPT, "tap", "--agent", "opencode"],
+            input='{"sessionID": "ocjunk", "tokens": "drifted"}',
+            capture_output=True, text=True, timeout=15, env=ENV)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertFalse(os.path.exists(
+            os.path.join(_CACHE_TMP.name, "claude-frog", "ocjunk.ctx")))
 
 
 class TestInstallSettings(unittest.TestCase):

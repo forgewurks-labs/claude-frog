@@ -1414,50 +1414,300 @@ def mode_dance(opts):
 
 
 # --------------------------------------------------------------------------- #
-# Mode: tap (silent token gauge — the statusLine command)                      #
+# Agent adapters — every agent-specific fact lives behind this seam            #
 # --------------------------------------------------------------------------- #
+# The frog itself is agent-agnostic. All it asks of the coding agent hosting it
+# is: a token gauge fed from somewhere, four lifecycle moments (session starts,
+# prompt lands, turn ends, session ends), and a config file it can wire itself
+# into. Everything that knows one agent *specifically* — payload shapes, hook
+# event names, the settings-file schema — is an AgentAdapter. Supporting a new
+# agent means writing a new adapter, not touching the frog.
+#
+# The seam stays this small because the frog never reads transcripts: all state
+# arrives through two doorways (the statusline payload and the hook payloads),
+# and both doorways go through the adapter.
+#
+# mode_hook dispatches on CANONICAL lifecycle events, never on native names:
+#   "session-start"  — a session began (claim the window's frog)
+#   "prompt"         — the user submitted a prompt (a turn is starting)
+#   "stop"           — the turn finished (back to idling)
+#   "session-end"    — the session is over (release the claim)
+# Adapters translate their native event names to these.
+#
+# See docs/adapters.md for the interface contract and the recorded decision to
+# keep adapters as sections of this one file rather than a module split.
 
 
-def _extract_tokens(payload):
-    cw = payload.get("context_window") or {}
-    up = cw.get("used_percentage")
-    size = cw.get("context_window_size") or cw.get("context_window") or 200_000
-    if up is not None:
-        try:
-            return int(round(float(up) / 100.0 * float(size)))
-        except Exception:
-            pass
-    for k in ("total_input_tokens", "used_tokens"):
-        if cw.get(k) is not None:
+class AgentAdapter:
+    """The interface an agent integration implements. Claude Code is adapter #1.
+
+    Subclasses provide:
+      name                — registry key ("claude-code")
+      HOOK_EVENTS         — native event names the installer wires up
+      detect()            — does this agent appear to be on this machine?
+      settings_path()     — the agent's own config file (honoring an override)
+      hook_event()        — native event name out of a hook payload
+      canonical_event()   — native event name -> canonical lifecycle event
+      session_id()        — session id out of any payload (hook or statusline)
+      extract_tokens() /
+      extract_window_size() — the token gauge, from the statusline payload
+      install_wiring() /
+      uninstall_wiring() /
+      wiring_status()     — schema surgery on the agent's PARSED settings, so
+                            install / uninstall / doctor share one copy of the
+                            schema knowledge instead of three
+    """
+
+    name = ""
+    HOOK_EVENTS = ()
+
+    def detect(self):
+        raise NotImplementedError
+
+    def settings_path(self, override=None):
+        raise NotImplementedError
+
+    def hook_event(self, payload):
+        raise NotImplementedError
+
+    def canonical_event(self, name):
+        raise NotImplementedError
+
+    def session_id(self, payload):
+        raise NotImplementedError
+
+    def extract_tokens(self, payload):
+        raise NotImplementedError
+
+    def extract_window_size(self, payload):
+        raise NotImplementedError
+
+    def install_wiring(self, data, tap_cmd, hook_cmd, is_ours, statusline=True):
+        raise NotImplementedError
+
+    def uninstall_wiring(self, data, is_ours):
+        raise NotImplementedError
+
+    def wiring_status(self, data, is_ours):
+        raise NotImplementedError
+
+
+class ClaudeCodeAdapter(AgentAdapter):
+    """Claude Code — the reference adapter.
+
+    Token usage arrives on the statusLine payload (hooks are token-blind), the
+    lifecycle arrives as hook events, and the wiring lives in
+    `~/.claude/settings.json` (one statusLine command; hooks as
+    {event: [{"hooks": [{"type", "command"}, ...]}, ...]}). Those three facts
+    are this class's whole reason to exist — nothing outside it knows them.
+    """
+
+    name = "claude-code"
+
+    # Hook events the installer wires (see install/settings-hooks.json).
+    HOOK_EVENTS = ("SessionStart", "UserPromptSubmit", "Stop", "SessionEnd")
+
+    # Native event name -> canonical lifecycle event. "Cleanup" is accepted as
+    # a session-end synonym (legacy invocations used it).
+    _EVENTS = {
+        "SessionStart": "session-start",
+        "UserPromptSubmit": "prompt",
+        "Stop": "stop",
+        "SessionEnd": "session-end",
+        "Cleanup": "session-end",
+    }
+
+    def _config_dir(self):
+        return (os.environ.get("CLAUDE_CONFIG_DIR")
+                or os.path.expanduser("~/.claude"))
+
+    def detect(self):
+        return os.path.isdir(self._config_dir())
+
+    def settings_path(self, override=None):
+        """Where settings.json lives (honoring --settings / CLAUDE_CONFIG_DIR)."""
+        return override or os.path.join(self._config_dir(), "settings.json")
+
+    # ------------------------------------------------- payloads -> readings --
+
+    def hook_event(self, payload):
+        return payload.get("hook_event_name") or ""
+
+    def canonical_event(self, name):
+        return self._EVENTS.get(name)
+
+    def session_id(self, payload):
+        return payload.get("session_id") or payload.get("sessionId") or None
+
+    def extract_tokens(self, payload):
+        cw = payload.get("context_window") or {}
+        up = cw.get("used_percentage")
+        size = cw.get("context_window_size") or cw.get("context_window") or 200_000
+        if up is not None:
             try:
-                return int(cw[k])
+                return int(round(float(up) / 100.0 * float(size)))
             except Exception:
                 pass
-    cu = cw.get("current_usage") or {}
-    tot = 0
-    got = False
-    for k in ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"):
-        if cu.get(k) is not None:
-            tot += int(cu[k]); got = True
-    return tot if got else None
+        for k in ("total_input_tokens", "used_tokens"):
+            if cw.get(k) is not None:
+                try:
+                    return int(cw[k])
+                except Exception:
+                    pass
+        cu = cw.get("current_usage") or {}
+        tot = 0
+        got = False
+        for k in ("input_tokens", "cache_read_input_tokens",
+                  "cache_creation_input_tokens"):
+            if cu.get(k) is not None:
+                tot += int(cu[k]); got = True
+        return tot if got else None
+
+    def extract_window_size(self, payload):
+        """The session's context window size, if the payload says. Else None.
+
+        Only used for the "% full" readout — the frog's *mood* stays anchored
+        in absolute tokens (see PINK_FULL_TOKENS), because that's what actually
+        tracks when long-context quality softens, whatever size your window is.
+        """
+        cw = payload.get("context_window") or {}
+        for k in ("context_window_size", "context_window"):
+            try:
+                v = int(cw.get(k))
+                if v > 0:
+                    return v
+            except (TypeError, ValueError):
+                pass
+        return None
+
+    # -------------------------------------- settings.json schema surgery -----
+    # `is_ours` is the frog's own "is this command mine?" predicate
+    # (_is_frog_cmd), passed in so the adapter carries the SCHEMA knowledge and
+    # the frog carries its own identity.
+
+    def event_has_hook(self, groups, is_ours):
+        """True if this event's hook list already runs a matching command."""
+        if not isinstance(groups, list):
+            return False
+        for g in groups:
+            for h in (g or {}).get("hooks", []) if isinstance(g, dict) else []:
+                if is_ours((h or {}).get("command")):
+                    return True
+        return False
+
+    def install_wiring(self, data, tap_cmd, hook_cmd, is_ours, statusline=True):
+        """Merge the wiring into parsed settings. Mutates `data` in place.
+
+        Returns (changed, notes) — human-readable lines for the installer to
+        print. Conservative on purpose: a statusLine that isn't ours is never
+        overwritten (Claude Code allows only one), and hook groups already
+        present are skipped, so re-running changes nothing. Raises ValueError
+        if `hooks` exists but isn't an object — the caller owns erroring out.
+        """
+        changed, notes = [], []
+        if statusline:
+            sl = data.get("statusLine")
+            cmd = (sl or {}).get("command") if isinstance(sl, dict) else None
+            if not sl:
+                data["statusLine"] = {"type": "command", "command": tap_cmd}
+                changed.append("statusLine → tap (token feed)")
+            elif is_ours(cmd):
+                if cmd.rstrip().endswith(" statusline"):
+                    data["statusLine"] = {"type": "command", "command": tap_cmd}
+                    changed.append("statusLine: statusline → tap "
+                                   "(the in-bar frog is deprecated)")
+                else:
+                    notes.append("statusLine already taps the frog — left as-is")
+            else:
+                notes.append(
+                    "you already have a statusLine — left as-is. Make sure it "
+                    "pipes the payload to `claude_frog.py tap` (see "
+                    "install/statusline-compose.sh) or the pane loses its gauge")
+
+        hooks = data.setdefault("hooks", {})
+        if not isinstance(hooks, dict):
+            raise ValueError("settings 'hooks' isn't an object")
+        for ev in self.HOOK_EVENTS:
+            groups = hooks.setdefault(ev, [])
+            if not isinstance(groups, list):
+                notes.append(f"hooks.{ev} isn't a list — skipped")
+                continue
+            if self.event_has_hook(groups, is_ours):
+                continue
+            groups.append({"hooks": [{"type": "command", "command": hook_cmd}]})
+            changed.append(f"hook {ev}")
+        return changed, notes
+
+    def uninstall_wiring(self, data, is_ours):
+        """Remove ONLY the matching wiring from parsed settings; mutate in place.
+
+        The mirror of install_wiring: drops our statusLine (never someone
+        else's) and any hook group of ours, prunes emptied event lists, leaves
+        everything else exactly as it was. Returns the removed lines.
+        """
+        removed = []
+        sl = data.get("statusLine")
+        if is_ours((sl or {}).get("command")):
+            del data["statusLine"]
+            removed.append("statusLine")
+
+        hooks = data.get("hooks")
+        if isinstance(hooks, dict):
+            for ev in self.HOOK_EVENTS:
+                groups = hooks.get(ev)
+                if not isinstance(groups, list):
+                    continue
+                kept = []
+                for g in groups:
+                    cmds = (g or {}).get("hooks", []) if isinstance(g, dict) else []
+                    if any(is_ours((h or {}).get("command")) for h in cmds):
+                        continue  # drop this frog group
+                    kept.append(g)
+                if len(kept) != len(groups):
+                    removed.append(f"hook {ev}")
+                    if kept:
+                        hooks[ev] = kept
+                    else:
+                        del hooks[ev]
+            if not hooks:
+                del data["hooks"]
+        return removed
+
+    def wiring_status(self, data, is_ours):
+        """(statusline_ok, foreign_statusline, hooks_ok) — doctor's view."""
+        sl_cmd = (data.get("statusLine") or {}).get("command")
+        sl_ok = is_ours(sl_cmd)
+        hk = data.get("hooks") or {}
+        hooks_ok = isinstance(hk, dict) and all(
+            self.event_has_hook(hk.get(ev), is_ours) for ev in self.HOOK_EVENTS)
+        return sl_ok, bool(sl_cmd) and not sl_ok, hooks_ok
 
 
-def _extract_window_size(payload):
-    """The session's context window size, if the payload says. Else None.
+# Every supported agent, keyed by adapter name; detection walks registry order.
+ADAPTERS = {a.name: a for a in (ClaudeCodeAdapter(),)}
+DEFAULT_AGENT = ClaudeCodeAdapter.name
 
-    Only used for the "% full" readout — the frog's *mood* stays anchored in
-    absolute tokens (see PINK_FULL_TOKENS), because that's what actually tracks
-    when long-context quality softens, whatever size your window is.
+
+def detect_agent():
+    """The adapter for whichever agent this machine appears to run.
+
+    First adapter whose detect() answers wins; Claude Code is the fallback, so
+    an empty machine still gets a working default. With one registered adapter
+    this always lands on Claude Code — the seam exists so adapter #2 is a class
+    plus a registry entry, not another sweep through the file.
     """
-    cw = payload.get("context_window") or {}
-    for k in ("context_window_size", "context_window"):
-        try:
-            v = int(cw.get(k))
-            if v > 0:
-                return v
-        except (TypeError, ValueError):
-            pass
-    return None
+    for a in ADAPTERS.values():
+        if a.detect():
+            return a
+    return ADAPTERS[DEFAULT_AGENT]
+
+
+ADAPTER = detect_agent()
+
+
+# --------------------------------------------------------------------------- #
+# Mode: tap (silent token gauge — the statusLine command)                      #
+# --------------------------------------------------------------------------- #
 
 
 def _tap(payload=None):
@@ -1476,9 +1726,9 @@ def _tap(payload=None):
     if not isinstance(payload, dict):
         payload = {}
 
-    session = (payload.get("session_id") or payload.get("sessionId") or "default")
+    session = ADAPTER.session_id(payload) or "default"
     try:
-        tokens = _extract_tokens(payload)
+        tokens = ADAPTER.extract_tokens(payload)
     except Exception:
         tokens = None
 
@@ -1572,7 +1822,7 @@ def mode_tap():
     if _setting("statusline")[0] == "frog":
         try:
             sys.stdout.write(_statusline_text(
-                session, tokens, _extract_window_size(payload),
+                session, tokens, ADAPTER.extract_window_size(payload),
                 _setting("theme")[0], _setting("fade")[0]))
         except Exception:
             pass                # a broken frog must never break your prompt
@@ -1580,7 +1830,7 @@ def mode_tap():
 
 
 # --------------------------------------------------------------------------- #
-# Mode: hook  (dispatch on hook_event_name; drives think-state + pane life)    #
+# Mode: hook  (lifecycle events, via the adapter; think-state + pane life)     #
 # --------------------------------------------------------------------------- #
 
 
@@ -1997,27 +2247,30 @@ def mode_hook(opts):
         payload = json.loads(raw) if raw.strip() else {}
     except Exception:
         payload = {}
-    event = payload.get("hook_event_name") or opts.get("event") or ""
-    session = (payload.get("session_id") or payload.get("sessionId")
+    event = ADAPTER.hook_event(payload) or opts.get("event") or ""
+    session = (ADAPTER.session_id(payload)
                or opts.get("session") or "default")
     think_path = _paths(session)[0]
 
-    if event == "SessionStart":
+    # Dispatch on the CANONICAL lifecycle event — the adapter owns what its
+    # native event names mean, this function owns what the frog does about it.
+    action = ADAPTER.canonical_event(event)
+    if action == "session-start":
         _prune_stale()
         _write_json(think_path, {"state": "idle", "turns": 0, "ts": time.time()})
         # Joins this window's frog, spawning him only if the window has none.
         _win_claim(session, opts.get("layout", DEFAULT_LAYOUT),
                    opts.get("theme", DEFAULT_THEME))
-    elif event == "UserPromptSubmit":
+    elif action == "prompt":
         _, turns = _read_think(session)
         _write_json(think_path, {"state": "thinking", "turns": turns + 1,
                                  "ts": time.time()})
         _win_touch(session)
-    elif event == "Stop":
+    elif action == "stop":
         _, turns = _read_think(session)
         _write_json(think_path, {"state": "idle", "turns": turns, "ts": time.time()})
         _win_touch(session)
-    elif event in ("SessionEnd", "Cleanup"):
+    elif action == "session-end":
         _win_release(session)
         _cleanup_session(session)
     sys.exit(0)
@@ -2107,8 +2360,9 @@ def mode_preview(opts):
     sys.exit(0)
 
 
-# Events the frog hooks into (see install/settings-hooks.json for the shape).
-FROG_HOOK_EVENTS = ("SessionStart", "UserPromptSubmit", "Stop", "SessionEnd")
+# Events the frog hooks into — the Claude Code adapter's list, re-exported
+# under its historical module-level name (tests and external callers use it).
+FROG_HOOK_EVENTS = ClaudeCodeAdapter.HOOK_EVENTS
 
 # The comment install.sh writes above the launcher `source` line; doctor greps
 # for it to confirm the launcher is installed. Keep in sync with install.sh.
@@ -2497,13 +2751,7 @@ def _is_frog_cmd(cmd):
 
 def _event_has_frog_hook(groups):
     """True if this event's hook list already runs the frog (any group)."""
-    if not isinstance(groups, list):
-        return False
-    for g in groups:
-        for h in (g or {}).get("hooks", []) if isinstance(g, dict) else []:
-            if _is_frog_cmd((h or {}).get("command")):
-                return True
-    return False
+    return ADAPTER.event_has_hook(groups, _is_frog_cmd)
 
 
 def mode_install_settings(opts):
@@ -2516,11 +2764,11 @@ def mode_install_settings(opts):
     A frog statusLine still on the deprecated `statusline` mode is migrated to
     `tap`. Unlike the tap/hook paths this is an explicit action, so it may fail
     loudly rather than swallowing errors.
+
+    The file I/O, backup, and reporting live here; everything that knows the
+    settings-file SCHEMA lives in the adapter (install_wiring).
     """
-    path = opts.get("settings") or os.path.join(
-        os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude"),
-        "settings.json",
-    )
+    path = ADAPTER.settings_path(opts.get("settings"))
     # "statusline" (the deprecated in-bar frog) and anything unrecognized both
     # land on tap; "none" skips the statusLine entirely.
     sl_mode = opts.get("statusline_mode") or "tap"
@@ -2545,44 +2793,13 @@ def mode_install_settings(opts):
             sys.stderr.write(f"✗ {path} isn't a JSON object; leaving it alone.\n")
             sys.exit(1)
 
-    changed, notes = [], []
-    hook_cmd = _frog_cmd("hook")
-
-    # statusLine (only one allowed) — add if absent, never overwrite yours.
-    if sl_mode != "none":
-        sl = data.get("statusLine")
-        cmd = (sl or {}).get("command") if isinstance(sl, dict) else None
-        if not sl:
-            data["statusLine"] = {"type": "command", "command": _frog_cmd("tap")}
-            changed.append("statusLine → tap (token feed)")
-        elif _is_frog_cmd(cmd):
-            if cmd.rstrip().endswith(" statusline"):
-                data["statusLine"] = {"type": "command",
-                                      "command": _frog_cmd("tap")}
-                changed.append("statusLine: statusline → tap "
-                               "(the in-bar frog is deprecated)")
-            else:
-                notes.append("statusLine already taps the frog — left as-is")
-        else:
-            notes.append(
-                "you already have a statusLine — left as-is. Make sure it "
-                "pipes the payload to `claude_frog.py tap` (see "
-                "install/statusline-compose.sh) or the pane loses its gauge")
-
-    # hooks — append a frog group per event, skipping any already present.
-    hooks = data.setdefault("hooks", {})
-    if not isinstance(hooks, dict):
+    try:
+        changed, notes = ADAPTER.install_wiring(
+            data, tap_cmd=_frog_cmd("tap"), hook_cmd=_frog_cmd("hook"),
+            is_ours=_is_frog_cmd, statusline=sl_mode != "none")
+    except ValueError:
         sys.stderr.write("✗ settings 'hooks' isn't an object; leaving it alone.\n")
         sys.exit(1)
-    for ev in FROG_HOOK_EVENTS:
-        groups = hooks.setdefault(ev, [])
-        if not isinstance(groups, list):
-            notes.append(f"hooks.{ev} isn't a list — skipped")
-            continue
-        if _event_has_frog_hook(groups):
-            continue
-        groups.append({"hooks": [{"type": "command", "command": hook_cmd}]})
-        changed.append(f"hook {ev}")
 
     if not changed:
         print(f"✅ {path} already wired for the frog — nothing to change.")
@@ -2614,22 +2831,15 @@ def mode_install_settings(opts):
     print("   Start a new Claude Code session to see him.")
 
 
-def _settings_path(opts):
-    """Where ~/.claude/settings.json lives (honoring --settings / CLAUDE_CONFIG_DIR)."""
-    return opts.get("settings") or os.path.join(
-        os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude"),
-        "settings.json",
-    )
-
-
 def mode_uninstall_settings(opts):
     """Remove ONLY the frog's statusLine + hooks from settings.json.
 
     The mirror of install-settings: backs the file up, drops the frog's own
     statusLine (never someone else's) and any frog hook groups, prunes emptied
     event lists, and leaves everything else exactly as it was. Idempotent.
+    Schema knowledge lives in the adapter (uninstall_wiring).
     """
-    path = _settings_path(opts)
+    path = ADAPTER.settings_path(opts.get("settings"))
     if not os.path.exists(path):
         print(f"Nothing to remove — {path} doesn't exist.")
         return
@@ -2644,32 +2854,7 @@ def mode_uninstall_settings(opts):
         sys.stderr.write(f"✗ {path} isn't a JSON object; leaving it alone.\n")
         sys.exit(1)
 
-    removed = []
-    sl = data.get("statusLine")
-    if _is_frog_cmd((sl or {}).get("command")):
-        del data["statusLine"]
-        removed.append("statusLine")
-
-    hooks = data.get("hooks")
-    if isinstance(hooks, dict):
-        for ev in FROG_HOOK_EVENTS:
-            groups = hooks.get(ev)
-            if not isinstance(groups, list):
-                continue
-            kept = []
-            for g in groups:
-                cmds = (g or {}).get("hooks", []) if isinstance(g, dict) else []
-                if any(_is_frog_cmd((h or {}).get("command")) for h in cmds):
-                    continue  # drop this frog group
-                kept.append(g)
-            if len(kept) != len(groups):
-                removed.append(f"hook {ev}")
-                if kept:
-                    hooks[ev] = kept
-                else:
-                    del hooks[ev]
-        if not hooks:
-            del data["hooks"]
+    removed = ADAPTER.uninstall_wiring(data, is_ours=_is_frog_cmd)
 
     if not removed:
         print(f"✅ No frog settings found in {path} — nothing to remove.")
@@ -2730,7 +2915,7 @@ def mode_doctor(opts):
     # settings.json: token feed (tap) + hooks. In --minimal mode the user
     # deliberately skipped these, so they're informational, not failures.
     minimal = bool(opts.get("minimal"))
-    path = _settings_path(opts)
+    path = ADAPTER.settings_path(opts.get("settings"))
     sl_ok = hooks_ok = False
     foreign_sl = False
     detail = "not wired — run install.sh"
@@ -2743,12 +2928,7 @@ def mode_doctor(opts):
         except ValueError:
             detail = f"{path} isn't valid JSON"
     if isinstance(data, dict):
-        sl_cmd = (data.get("statusLine") or {}).get("command")
-        sl_ok = _is_frog_cmd(sl_cmd)
-        foreign_sl = bool(sl_cmd) and not sl_ok
-        hk = data.get("hooks") or {}
-        hooks_ok = isinstance(hk, dict) and all(
-            _event_has_frog_hook(hk.get(ev)) for ev in FROG_HOOK_EVENTS)
+        sl_ok, foreign_sl, hooks_ok = ADAPTER.wiring_status(data, _is_frog_cmd)
     if minimal and not sl_ok:
         rows.append(("Token feed (tap)", True, False, "skipped (--minimal)"))
         rows.append(("Dance hooks", True, False, "skipped (--minimal)"))

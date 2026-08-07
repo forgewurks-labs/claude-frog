@@ -1,6 +1,10 @@
 __pycache__/
 *.pyc
 .venv/
+# packaging outputs (pip install . / python -m build)
+build/
+dist/
+*.egg-info/
 .DS_Store
 # per-machine agent settings
 .claude/settings.local.json

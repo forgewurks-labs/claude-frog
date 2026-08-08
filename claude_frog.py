@@ -1443,23 +1443,59 @@ class AgentAdapter:
 
     Subclasses provide:
       name                — registry key ("claude-code")
+      display             — the agent's name as humans write it ("Claude Code")
       HOOK_EVENTS         — native event names the installer wires up
       detect()            — does this agent appear to be on this machine?
-      settings_path()     — the agent's own config file (honoring an override)
+      settings_path()     — the agent's own wiring artifact (honoring an override)
       hook_event()        — native event name out of a hook payload
       canonical_event()   — native event name -> canonical lifecycle event
       session_id()        — session id out of any payload (hook or statusline)
       extract_tokens() /
       extract_window_size() — the token gauge, from the statusline payload
+      parse_settings() /
+      serialize_settings() — text <-> the parsed form the wiring methods take.
+                            The default is the JSON dance (parse errors raised
+                            as ValueError); an adapter whose wiring artifact
+                            isn't JSON overrides both. serialize_settings may
+                            return None, which tells the caller the artifact
+                            should be REMOVED rather than written.
       install_wiring() /
       uninstall_wiring() /
       wiring_status()     — schema surgery on the agent's PARSED settings, so
                             install / uninstall / doctor share one copy of the
                             schema knowledge instead of three
+
+    USES_SHELL_LAUNCHER says whether the `claude <THEME>` shell launcher story
+    applies to this agent (doctor skips that check when it doesn't), and
+    INSTALL_HINT is what doctor tells the user to run when wiring is missing.
     """
 
     name = ""
+    display = ""
     HOOK_EVENTS = ()
+    USES_SHELL_LAUNCHER = True
+    INSTALL_HINT = "run install.sh"
+
+    def parse_settings(self, text):
+        """Artifact text (None if the file is absent) -> the wiring methods' form.
+
+        The default speaks JSON — the common case for agent config files —
+        raising ValueError on text that can't be honored. Adapters whose wiring
+        artifact isn't a JSON file override this (and serialize_settings).
+        """
+        if text is None or not text.strip():
+            return {}
+        try:
+            data = json.loads(text)
+        except ValueError as e:
+            raise ValueError(f"isn't valid JSON ({e})")
+        if not isinstance(data, dict):
+            raise ValueError("isn't a JSON object")
+        return data
+
+    def serialize_settings(self, data):
+        """The wiring methods' form -> artifact text, or None for "remove it"."""
+        return json.dumps(data, indent=2) + "\n"
 
     def detect(self):
         raise NotImplementedError
@@ -1503,6 +1539,7 @@ class ClaudeCodeAdapter(AgentAdapter):
     """
 
     name = "claude-code"
+    display = "Claude Code"
 
     # Hook events the installer wires (see install/settings-hooks.json).
     HOOK_EVENTS = ("SessionStart", "UserPromptSubmit", "Stop", "SessionEnd")
@@ -1683,8 +1720,280 @@ class ClaudeCodeAdapter(AgentAdapter):
         return sl_ok, bool(sl_cmd) and not sl_ok, hooks_ok
 
 
+class OpencodeAdapter(AgentAdapter):
+    """opencode (opencode.ai) — adapter #2, the seam's first outside consumer.
+
+    The facts this class owns (verified against anomalyco/opencode 1.18.x,
+    2026-08):
+
+    - opencode has NO statusline and no shell-command hook schema. Its whole
+      extension surface is a JS plugin: an ES module auto-loaded from
+      `~/.config/opencode/plugin{,s}/*.js`, run in-process under Bun. So the
+      frog's wiring artifact is ONE generated plugin file this adapter fully
+      owns — parse/serialize are text passthrough, and serialize_settings
+      returning None means "remove the file".
+    - The generated plugin is the adapter's arm inside opencode: it translates
+      the runtime surface into the frog's two doorways. Lifecycle moments are
+      piped to `hook` under the native names in HOOK_EVENTS (`chat.message` is
+      opencode's own name for "a user message arrived"; the plugin also
+      re-fires `session.deleted` from its `dispose` hook so quitting opencode
+      releases the window claim instead of leaking it).
+    - Tokens are REAL here, not degraded: assistant `message.updated` events
+      carry {input, output, reasoning, cache:{read, write}}, and the model's
+      context size (Model.limit.context, seen by the plugin's `chat.params`
+      hook) rides along in the tap payload. The accounting mirrors the Claude
+      Code adapter — input + cache read + cache write of the last request.
+      Any schema drift degrades to None: a calm green frog whose goofiness
+      ramps on turn count instead (FALLBACK_UNHINGED_TURNS), which is the
+      honest fallback, not a crash.
+    """
+
+    name = "opencode"
+    display = "opencode"
+    USES_SHELL_LAUNCHER = False
+    INSTALL_HINT = "run: claude-frog install-settings --agent opencode"
+
+    # Native names the generated plugin reports — three bus events plus
+    # opencode's own `chat.message` hook name for a user prompt.
+    HOOK_EVENTS = ("session.created", "chat.message",
+                   "session.idle", "session.deleted")
+
+    _EVENTS = {
+        "session.created": "session-start",
+        "chat.message": "prompt",
+        "session.idle": "stop",
+        "session.deleted": "session-end",
+    }
+
+    # First line of the generated plugin; identity + docs pointer in one.
+    MARKER = "claude-frog opencode plugin"
+
+    def _config_dir(self):
+        return (os.environ.get("OPENCODE_CONFIG_DIR")
+                or os.path.join(
+                    os.environ.get("XDG_CONFIG_HOME")
+                    or os.path.expanduser("~/.config"), "opencode"))
+
+    def detect(self):
+        from shutil import which
+        return bool(which("opencode")) or os.path.isdir(self._config_dir())
+
+    def settings_path(self, override=None):
+        """The frog's own plugin file, in whichever plugin dir already exists.
+
+        opencode globs both `plugin/` and `plugins/`; joining an existing dir
+        keeps the user's layout instead of imposing a second spelling.
+        """
+        if override:
+            return override
+        base = self._config_dir()
+        for d in ("plugin", "plugins"):
+            p = os.path.join(base, d)
+            if os.path.isdir(p):
+                return os.path.join(p, "claude-frog.js")
+        return os.path.join(base, "plugin", "claude-frog.js")
+
+    # ------------------------------------------------- payloads -> readings --
+
+    def hook_event(self, payload):
+        return payload.get("type") or ""
+
+    def canonical_event(self, name):
+        return self._EVENTS.get(name)
+
+    def session_id(self, payload):
+        """Tap payloads carry sessionID at the top; bus events nest it under
+        properties.sessionID or properties.info.{sessionID,id}."""
+        props = payload.get("properties")
+        props = props if isinstance(props, dict) else {}
+        info = props.get("info")
+        info = info if isinstance(info, dict) else {}
+        sid = (payload.get("sessionID") or props.get("sessionID")
+               or info.get("sessionID") or info.get("id"))
+        return sid if isinstance(sid, str) and sid else None
+
+    def extract_tokens(self, payload):
+        """input + cache.read + cache.write of the last assistant request —
+        the same "what's occupying the window" accounting as Claude Code
+        (output isn't added: it becomes the NEXT request's input). Any drift
+        from that shape returns None and the gauge degrades to turn count."""
+        tok = payload.get("tokens")
+        if not isinstance(tok, dict):
+            props = payload.get("properties")
+            info = props.get("info") if isinstance(props, dict) else None
+            tok = info.get("tokens") if isinstance(info, dict) else None
+        if not isinstance(tok, dict):
+            return None
+        cache = tok.get("cache")
+        cache = cache if isinstance(cache, dict) else {}
+        tot, got = 0, False
+        for v in (tok.get("input"), cache.get("read"), cache.get("write")):
+            if v is None:
+                continue
+            try:
+                tot += int(v)
+                got = True
+            except (TypeError, ValueError):
+                pass
+        return tot if got else None
+
+    def extract_window_size(self, payload):
+        lim = payload.get("limit")
+        if isinstance(lim, dict):
+            lim = lim.get("context")
+        try:
+            v = int(lim)
+            return v if v > 0 else None
+        except (TypeError, ValueError):
+            return None
+
+    # ------------------------------- the wiring artifact: our plugin file ----
+    # "Parsed settings" for this adapter is just {"text": <file text or None>}:
+    # the file is ours outright, so surgery is generate / compare / remove,
+    # never merge. The mode functions still own all file I/O.
+
+    def parse_settings(self, text):
+        return {"text": text}
+
+    def serialize_settings(self, data):
+        return data.get("text")
+
+    def _plugin_js(self, tap_cmd, hook_cmd):
+        """The whole plugin, generated with the frog's argv baked in.
+
+        Same never-crash discipline as the Python side, extended into Bun:
+        every handler swallows its errors, and sends are fire-and-forget
+        detached spawns — a broken frog must never break an opencode turn.
+        """
+        import shlex
+        tap = json.dumps(shlex.split(tap_cmd))
+        hook = json.dumps(shlex.split(hook_cmd))
+        return f"""\
+// {self.MARKER} — generated by `claude-frog install-settings --agent opencode`.
+// Managed by claude-frog: re-running install-settings regenerates this file
+// and uninstall-settings removes it. Hand edits will be overwritten.
+import {{ spawn }} from "node:child_process";
+
+const TAP = {tap};
+const HOOK = {hook};
+
+function send(argv, payload) {{
+  try {{
+    const child = spawn(argv[0], argv.slice(1), {{
+      stdio: ["pipe", "ignore", "ignore"],
+      detached: true,
+    }});
+    child.on("error", () => {{}});
+    child.stdin.on("error", () => {{}});
+    child.stdin.end(JSON.stringify(payload));
+    child.unref();
+  }} catch {{}}
+}}
+
+export const ClaudeFrogPlugin = async () => {{
+  const sessions = new Set(); // top-level sessions we've seen start
+  const limits = new Map();   // sessionID -> the model's context window size
+  // `sessions` gates events to sessions we saw start (subagent child sessions
+  // stay frogless); an empty set means the plugin missed the start (reloaded
+  // mid-session), so everything passes rather than going silent.
+  const known = (id) => !sessions.size || sessions.has(id);
+  return {{
+    event: async ({{ event }}) => {{
+      try {{
+        const t = event?.type;
+        const p = event?.properties ?? {{}};
+        if (t === "session.created") {{
+          if (p.info?.parentID) return;
+          sessions.add(p.info?.id);
+          send(HOOK, event);
+        }} else if (t === "session.idle") {{
+          if (known(p.sessionID)) send(HOOK, event);
+        }} else if (t === "session.deleted") {{
+          sessions.delete(p.info?.id);
+          send(HOOK, event);
+        }} else if (t === "message.updated") {{
+          const info = p.info;
+          if (info?.role === "assistant" && info.tokens && known(info.sessionID))
+            send(TAP, {{ sessionID: info.sessionID, tokens: info.tokens,
+                        limit: {{ context: limits.get(info.sessionID) }} }});
+        }}
+      }} catch {{}}
+    }},
+    "chat.message": async (input) => {{
+      try {{
+        if (known(input?.sessionID))
+          send(HOOK, {{ type: "chat.message",
+                       properties: {{ sessionID: input?.sessionID }} }});
+      }} catch {{}}
+    }},
+    "chat.params": async (input) => {{
+      try {{
+        const ctx = input?.model?.limit?.context;
+        if (ctx) limits.set(input.sessionID, ctx);
+      }} catch {{}}
+    }},
+    dispose: async () => {{
+      // opencode fires no session-end when it simply exits; releasing the
+      // window claims here is what keeps quit-without-deleting from leaking
+      // frogs (the Python side also ages out stale claims as a backstop).
+      try {{
+        for (const id of sessions)
+          send(HOOK, {{ type: "session.deleted",
+                       properties: {{ info: {{ id }} }} }});
+      }} catch {{}}
+    }},
+  }};
+}};
+"""
+
+    def install_wiring(self, data, tap_cmd, hook_cmd, is_ours, statusline=True):
+        """Write-or-refresh our plugin file. Mutates `data` in place.
+
+        A file that exists but isn't ours is refused (ValueError) — unlike a
+        shared settings file there is nothing to merge into, and silently
+        replacing someone's plugin is exactly the clobbering install-settings
+        promises not to do. The `statusline` flag has nothing to skip here:
+        the gauge rides the same plugin as the hooks.
+        """
+        current = data.get("text")
+        generated = self._plugin_js(tap_cmd, hook_cmd)
+        notes = []
+        if not statusline:
+            notes.append("opencode has no statusline — the token gauge rides "
+                         "the same plugin as the hooks, so there was nothing "
+                         "to skip")
+        if current and current.strip():
+            if self.MARKER not in current and not is_ours(current):
+                raise ValueError(
+                    "already exists and isn't the frog's plugin — move it "
+                    "aside, then re-run")
+            if current == generated:
+                return [], notes
+            data["text"] = generated
+            return ["opencode plugin refreshed (paths or plugin code "
+                    "had drifted)"], notes
+        data["text"] = generated
+        return ["opencode plugin (dance hooks + token feed)"], notes
+
+    def uninstall_wiring(self, data, is_ours):
+        current = data.get("text")
+        if current and (self.MARKER in current or is_ours(current)):
+            data["text"] = None      # serialize_settings(None) -> remove file
+            return ["opencode plugin (claude-frog.js)"]
+        return []
+
+    def wiring_status(self, data, is_ours):
+        """One plugin carries both doorways, so gauge and hooks stand or fall
+        together. A foreign file at our path never reads as a foreign
+        statusline (opencode has none) — it reads as "not wired", and
+        install-settings is where the refusal-with-explanation lives."""
+        current = data.get("text") or ""
+        ours = self.MARKER in current and is_ours(current)
+        return ours, False, ours
+
+
 # Every supported agent, keyed by adapter name; detection walks registry order.
-ADAPTERS = {a.name: a for a in (ClaudeCodeAdapter(),)}
+ADAPTERS = {a.name: a for a in (ClaudeCodeAdapter(), OpencodeAdapter())}
 DEFAULT_AGENT = ClaudeCodeAdapter.name
 
 
@@ -2741,8 +3050,14 @@ def mode_uninstall_keybind(opts):
 
 
 def _frog_cmd(kind):
-    """The command string baked into settings.json for `kind` (hook/tap)."""
-    return f"{_python()} {os.path.abspath(__file__)} {kind}"
+    """The command string baked into the agent's wiring for `kind` (hook/tap).
+
+    A non-default agent is pinned right in the command — the wired invocation
+    must land on the adapter that wrote it, whatever detection would say."""
+    cmd = f"{_python()} {os.path.abspath(__file__)} {kind}"
+    if ADAPTER.name != DEFAULT_AGENT:
+        cmd += f" --agent {ADAPTER.name}"
+    return cmd
 
 
 def _is_frog_cmd(cmd):
@@ -2775,30 +3090,25 @@ def mode_install_settings(opts):
     if sl_mode != "none":
         sl_mode = "tap"
 
-    # Load existing settings, refusing to clobber a file we can't parse.
-    data = {}
+    # Load the existing artifact, refusing to clobber one we can't honor.
+    text = None
     existed = os.path.exists(path)
     if existed:
         with open(path) as f:
             text = f.read()
-        if text.strip():
-            try:
-                data = json.loads(text)
-            except ValueError as e:
-                sys.stderr.write(
-                    f"✗ {path} isn't valid JSON ({e}); leaving it untouched.\n"
-                    f"  Fix or move it, then re-run.\n")
-                sys.exit(1)
-        if not isinstance(data, dict):
-            sys.stderr.write(f"✗ {path} isn't a JSON object; leaving it alone.\n")
-            sys.exit(1)
+    try:
+        data = ADAPTER.parse_settings(text)
+    except ValueError as e:
+        sys.stderr.write(f"✗ {path} {e}; leaving it untouched.\n"
+                         f"  Fix or move it, then re-run.\n")
+        sys.exit(1)
 
     try:
         changed, notes = ADAPTER.install_wiring(
             data, tap_cmd=_frog_cmd("tap"), hook_cmd=_frog_cmd("hook"),
             is_ours=_is_frog_cmd, statusline=sl_mode != "none")
-    except ValueError:
-        sys.stderr.write("✗ settings 'hooks' isn't an object; leaving it alone.\n")
+    except ValueError as e:
+        sys.stderr.write(f"✗ {path} {e}; leaving it alone.\n")
         sys.exit(1)
 
     if not changed:
@@ -2817,8 +3127,7 @@ def mode_install_settings(opts):
             pass
     tmp = path + ".tmp"
     with open(tmp, "w") as f:
-        json.dump(data, f, indent=2)
-        f.write("\n")
+        f.write(ADAPTER.serialize_settings(data))
     os.replace(tmp, path)
 
     print(f"✅ Wired the frog into {path}:")
@@ -2828,7 +3137,7 @@ def mode_install_settings(opts):
         print(f"   • {n}")
     if existed:
         print(f"   (backed up your previous settings to {path}.bak)")
-    print("   Start a new Claude Code session to see him.")
+    print(f"   Start a new {ADAPTER.display} session to see him.")
 
 
 def mode_uninstall_settings(opts):
@@ -2846,12 +3155,9 @@ def mode_uninstall_settings(opts):
     with open(path) as f:
         text = f.read()
     try:
-        data = json.loads(text) if text.strip() else {}
-    except ValueError:
-        sys.stderr.write(f"✗ {path} isn't valid JSON; leaving it untouched.\n")
-        sys.exit(1)
-    if not isinstance(data, dict):
-        sys.stderr.write(f"✗ {path} isn't a JSON object; leaving it alone.\n")
+        data = ADAPTER.parse_settings(text)
+    except ValueError as e:
+        sys.stderr.write(f"✗ {path} {e}; leaving it untouched.\n")
         sys.exit(1)
 
     removed = ADAPTER.uninstall_wiring(data, is_ours=_is_frog_cmd)
@@ -2862,11 +3168,16 @@ def mode_uninstall_settings(opts):
 
     with open(path + ".bak", "w") as f:
         f.write(text)
-    tmp = path + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(data, f, indent=2)
-        f.write("\n")
-    os.replace(tmp, path)
+    out = ADAPTER.serialize_settings(data)
+    if out is None:
+        # The wiring artifact was wholly ours (e.g. opencode's plugin file):
+        # uninstalling it means the file goes away, not that it empties.
+        os.remove(path)
+    else:
+        tmp = path + ".tmp"
+        with open(tmp, "w") as f:
+            f.write(out)
+        os.replace(tmp, path)
     print(f"✅ Removed the frog from {path}:")
     for r in removed:
         print(f"   - {r}")
@@ -2893,24 +3204,30 @@ def mode_doctor(opts):
                  "%d.%d.%d" % sys.version_info[:3]
                  + ("" if py_ok else " — below the declared floor (3.9+)")))
 
-    # Launcher line in a shell rc (use --rc if the installer told us which one).
-    rc = opts.get("rc")
-    candidates = [rc] if rc else [
-        os.path.expanduser(p)
-        for p in ("~/.zshrc", "~/.bashrc", "~/.bash_profile", "~/.profile")]
-    found_rc = None
-    for p in candidates:
-        if p and os.path.exists(p):
-            try:
-                with open(p) as f:
-                    if MARKER in f.read():
-                        found_rc = p
-                        break
-            except OSError:
-                pass
-    rows.append(("Launcher (claude SEGA)", found_rc is not None, True,
-                 f"in {found_rc}" if found_rc
-                 else "not found in your shell rc — run install.sh"))
+    # Launcher line in a shell rc (use --rc if the installer told us which
+    # one). Only agents with a shell-launcher story get judged on it.
+    if ADAPTER.USES_SHELL_LAUNCHER:
+        rc = opts.get("rc")
+        candidates = [rc] if rc else [
+            os.path.expanduser(p)
+            for p in ("~/.zshrc", "~/.bashrc", "~/.bash_profile", "~/.profile")]
+        found_rc = None
+        for p in candidates:
+            if p and os.path.exists(p):
+                try:
+                    with open(p) as f:
+                        if MARKER in f.read():
+                            found_rc = p
+                            break
+                except OSError:
+                    pass
+        rows.append(("Launcher (claude SEGA)", found_rc is not None, True,
+                     f"in {found_rc}" if found_rc
+                     else "not found in your shell rc — run install.sh"))
+    else:
+        rows.append(("Launcher", True, False,
+                     f"n/a for {ADAPTER.display} — pick a theme with "
+                     "`claude-frog config theme <name>`"))
 
     # settings.json: token feed (tap) + hooks. In --minimal mode the user
     # deliberately skipped these, so they're informational, not failures.
@@ -2918,16 +3235,16 @@ def mode_doctor(opts):
     path = ADAPTER.settings_path(opts.get("settings"))
     sl_ok = hooks_ok = False
     foreign_sl = False
-    detail = "not wired — run install.sh"
+    detail = f"not wired — {ADAPTER.INSTALL_HINT}"
     data = None
     if os.path.exists(path):
         try:
             with open(path) as f:
                 t = f.read()
-            data = json.loads(t) if t.strip() else {}
-        except ValueError:
-            detail = f"{path} isn't valid JSON"
-    if isinstance(data, dict):
+            data = ADAPTER.parse_settings(t)
+        except ValueError as e:
+            detail = f"{path} {e}"
+    if data is not None:
         sl_ok, foreign_sl, hooks_ok = ADAPTER.wiring_status(data, _is_frog_cmd)
     if minimal and not sl_ok:
         rows.append(("Token feed (tap)", True, False, "skipped (--minimal)"))
@@ -2945,7 +3262,7 @@ def mode_doctor(opts):
             rows.append(("Token feed (tap)", False, True, detail))
         rows.append(("Dance hooks", hooks_ok, False,
                      "all 4 events wired" if hooks_ok
-                     else "some hooks missing — re-run install.sh"))
+                     else f"some hooks missing — {ADAPTER.INSTALL_HINT}"))
 
     # Settings, and — the useful part — where each answer is coming from. An
     # `export CLAUDE_FROG_THEME=` left in a shell rc silently outranks the
@@ -3015,7 +3332,9 @@ def mode_doctor(opts):
     print()
     if crit_ok:
         print(C_OK + "All set." + R
-              + "  Open a NEW terminal (or `source` your rc), then:  claude SEGA")
+              + ("  Open a NEW terminal (or `source` your rc), then:  claude SEGA"
+                 if ADAPTER.USES_SHELL_LAUNCHER
+                 else f"  Start a new {ADAPTER.display} session to see him."))
     else:
         print(C_WARN + "Some things need attention" + R
               + f" — fix the ⚠️  above, then re-run:  {_python()} "
@@ -3048,7 +3367,7 @@ def _parse(argv):
     opts = {"session": None, "window": None, "layout": None, "theme": None,
             "always": False, "party": False, "event": None,
             "settings": None, "statusline_mode": "tap", "rc": None,
-            "minimal": False, "since": None, "tmux_conf": None}
+            "minimal": False, "since": None, "tmux_conf": None, "agent": None}
     i = 1
     while i < len(argv):
         a = argv[i]
@@ -3064,6 +3383,8 @@ def _parse(argv):
             i += 1; opts["event"] = argv[i]
         elif a == "--settings":
             i += 1; opts["settings"] = argv[i]
+        elif a == "--agent":
+            i += 1; opts["agent"] = argv[i]
         elif a == "--statusline-mode":
             i += 1; opts["statusline_mode"] = argv[i]
         elif a == "--rc":
@@ -3099,6 +3420,19 @@ def _parse(argv):
 
 def main():
     mode, opts = _parse(sys.argv[1:])
+    # --agent pins the adapter for this invocation (wired commands carry it so
+    # they land where they were installed); detection stays the default. An
+    # unknown name is a loud error on explicit modes — but the tap/hook paths
+    # never crash, so there it falls back to detection instead.
+    global ADAPTER
+    if opts.get("agent"):
+        picked = ADAPTERS.get(opts["agent"])
+        if picked is not None:
+            ADAPTER = picked
+        elif mode not in ("tap", "statusline", "hook"):
+            sys.stderr.write(f"unknown agent: {opts['agent']} "
+                             f"(supported: {', '.join(ADAPTERS)})\n")
+            sys.exit(2)
     try:
         if mode == "dance":
             if not opts["session"] and not opts["window"]:

@@ -140,6 +140,25 @@ re-wires idempotently), or `git -C ~/.claude-frog pull`. **Remove** it completel
 — launcher line *and* settings wiring, restoring your backups — with
 `~/.claude-frog/install.sh --uninstall`.
 
+### 🦎 Using him with opencode
+
+The frog also dances for [opencode](https://opencode.ai) — same frog, same
+pane, same gauge. There's no shell launcher to install for opencode; the
+wiring is a single plugin file the frog writes (and removes) itself:
+
+```sh
+python3 ~/.claude-frog/claude_frog.py install-settings --agent opencode
+python3 ~/.claude-frog/claude_frog.py doctor --agent opencode      # checkup
+python3 ~/.claude-frog/claude_frog.py uninstall-settings --agent opencode
+```
+
+That drops `claude-frog.js` into `~/.config/opencode/plugin/` — opencode
+loads it on startup, and it pipes session lifecycle and token usage to the
+frog. He dances while opencode works, and the context gauge reads real token
+counts (with the model's own window size). Pick his theme with
+`python3 ~/.claude-frog/claude_frog.py config theme <name>` — the
+per-session `claude SEGA` trick is a Claude Code launcher thing.
+
 ---
 
 ## How he runs

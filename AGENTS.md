@@ -15,6 +15,11 @@ Repo context for coding agents (any brand — this file is canonical; `CLAUDE.md
   behind the `AgentAdapter` seam in the "Agent adapters" section — nothing outside it may
   know those facts. Claude Code is the reference adapter; opencode is adapter #2 (wired
   via a generated plugin file, selected with `--agent opencode`); see `docs/adapters.md`.
+- Everything multiplexer-specific (pane commands, window-id format, split geometry) lives
+  behind the `RenderSurface` seam in the "Rendering surfaces" section. tmux is the sole
+  supported surface — declared scaffolding; a second backend is demand-gated (FWL-549);
+  see `docs/surfaces.md`.
 - Tests: `python3 -m unittest discover -s tests`. CI runs the same plus a byte-compile gate.
 - Design notes: `docs/themes.md` (themes + launcher architecture), `docs/adapters.md`
-  (the agent-adapter seam), and the README's "How it works" material.
+  (the agent-adapter seam), `docs/surfaces.md` (the rendering-surface seam), and the
+  README's "How it works" material.

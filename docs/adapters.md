@@ -1,8 +1,9 @@
 # Agent adapters
 
 Contributor notes for the adapter seam: where the frog ends and the coding
-agent hosting him begins. For user-facing setup, see the
-[README](../README.md); this doc is about the internals. Everything here should
+agent hosting him begins. (The sibling seam facing the terminal multiplexer —
+where his *pane* lives — is [surfaces.md](surfaces.md).) For user-facing
+setup, see the [README](../README.md); this doc is about the internals. Everything here should
 be verified against `claude_frog.py` before you rely on it — the code is the
 source of truth.
 

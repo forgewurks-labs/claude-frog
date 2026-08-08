@@ -21,10 +21,11 @@ It's a self-inflicted CPU tax. That's the point. He's worth it.
 **You need:** macOS, Linux, or WSL (native Windows isn't supported), `python3`
 **3.9 or newer** (macOS and most Linux distros ship one), **tmux** — a hard
 requirement: the frog dances in a dedicated tmux pane, no tmux means no frog —
-and a **truecolor** terminal (WezTerm, iTerm2, Kitty) with a font that draws
-the `▀`/`▄` half-block glyphs. There's no 256-color fallback, and `NO_COLOR`
-isn't honored — `doctor` (below) checks all of this. `git` too, for the
-one-liner.
+and a terminal with a font that draws the `▀`/`▄` half-block glyphs. A
+**truecolor** terminal (WezTerm, iTerm2, Kitty) gets the real palettes;
+anything else gets a 256-color approximation, and `NO_COLOR` is honored
+(glyphs only) — `doctor` (below) reports which you're getting. `git` too,
+for the one-liner.
 
 ### 1. Install
 
@@ -434,8 +435,10 @@ UserPromptSubmit / Stop hooks ─┐
   never break your prompt.
 
 Rendering is Unicode half-blocks (`▀`/`▄`) with 24-bit truecolor: two pixels per
-character cell, so he's real pixel art, not ASCII. Needs a truecolor terminal
-(WezTerm, iTerm2, Kitty, modern tmux with `RGB`).
+character cell, so he's real pixel art, not ASCII. In a truecolor terminal
+(WezTerm, iTerm2, Kitty, modern tmux with `RGB`) you get the palettes as
+designed; elsewhere they're quantized to xterm-256, and under `NO_COLOR` he's
+drawn as uncolored glyphs.
 
 ## Peek at him without installing anything
 

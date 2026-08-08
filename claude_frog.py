@@ -68,15 +68,18 @@ PINK_FULL_TOKENS = 200_000
 FPS_ACTIVE = 12.0             # dancing (a turn is running)
 FPS_IDLE = 4.0                # idling (between turns)
 
-# Pane layouts: name -> (tmux split axis, size). Vertical splits are sized in
-# lines, horizontal ones in columns. `top`/`left` place the pane before the
-# current one; `bottom`/`right` after it. He always stands on the pane's floor,
-# so a top pane puts him directly above your prompt, facing down at your work.
+# Pane layouts: name -> pane size. Vertical layouts (top/bottom) are sized in
+# lines, horizontal ones (left/right) in columns. `top`/`left` place the pane
+# before the current one; `bottom`/`right` after it. He always stands on the
+# pane's floor, so a top pane puts him directly above your prompt, facing down
+# at your work. The names and sizes are the frog's vocabulary (how much room he
+# needs); what a layout means in actual splits belongs to the rendering surface
+# (TmuxSurface owns the split-axis translation).
 LAYOUTS = {
-    "bottom": ("-v", 7),
-    "top": ("-v", 7),
-    "right": ("-h", 24),
-    "left": ("-h", 24),
+    "bottom": 7,
+    "top": 7,
+    "right": 24,
+    "left": 24,
 }
 DEFAULT_LAYOUT = "top"
 
@@ -2139,11 +2142,32 @@ def mode_tap():
 
 
 # --------------------------------------------------------------------------- #
-# Mode: hook  (lifecycle events, via the adapter; think-state + pane life)     #
+# Rendering surfaces — every pane/multiplexer fact lives behind this seam      #
 # --------------------------------------------------------------------------- #
+# The frog's window bookkeeping is surface-agnostic. All it asks of the thing
+# hosting his pane is: a way to tell which "window" this process is in, to
+# split a pane beside the user's shell (and later kill it), and to enumerate
+# the panes that exist right now — liveness is how claims are pruned.
+# Everything that knows one surface *specifically* — its command vocabulary,
+# window-id format, split geometry, the pane-stamping trick — is a
+# RenderSurface. Supporting a new surface means writing a new one and adding
+# it to the SURFACES registry, not sweeping through the file.
+#
+# ⚠️ Declared scaffolding (FWL-549): tmux is the SOLE supported surface, and
+# detect_surface() hard-lands on it. The seam exists so a second backend
+# (Zellij, kitty splits, a standalone-terminal mode, …) is a class plus a
+# registry entry — but building one is demand-gated: hold until users ask.
+# Outside tmux the frog degrades exactly as he always has: window_id() is
+# None, so no pane spawns and the statusline gauge carries the whole show.
+# Contract and the recorded decision: docs/surfaces.md.
 
 
 def _tmux(*args):
+    """Run one tmux command — the tmux surface's plumbing.
+
+    Module-level on purpose: the tests stand a fake server in here, and the
+    toggle-keybind installer (tmux-backend integration, further down) shares it.
+    """
     import subprocess
     try:
         return subprocess.run(["tmux", *args], capture_output=True, text=True,
@@ -2152,61 +2176,215 @@ def _tmux(*args):
         return None
 
 
-def _in_tmux():
-    return bool(os.environ.get("TMUX"))
+class RenderSurface:
+    """The interface a rendering surface implements. tmux is surface #1.
 
+    Subclasses provide:
+      name              — registry key ("tmux")
+      display           — the surface's name as humans write it
+      inside()          — is this process running under the surface?
+      current_pane()    — the pane THIS process runs in (None if unknowable)
+      window_id()       — the window holding a pane (or this process); None
+                          when outside the surface, which is what makes every
+                          caller degrade to the paneless story
+      valid_window()    — is a window id well-formed? Ids are derived from the
+                          environment but end up on command lines, so this is
+                          where that assumption gets checked
+      window_token() /
+      window_from_token() — window id <-> the filename-safe token the window
+                          state files are named by (win-<token>.json)
+      live_panes()      — every pane id alive right now (claim liveness)
+      frog_panes()      — {pane_id: window} for panes stamped as frogs
+      spawn_pane()      — create the frog's stamped pane; the one place a
+                          frog pane is ever born
+      kill_pane()       — tear one down
 
-def _live_panes():
-    """Every pane id tmux currently knows about, across all its sessions."""
-    r = _tmux("list-panes", "-a", "-F", "#{pane_id}")
-    return set((r.stdout or "").split()) if r else set()
-
-
-def _frog_panes():
-    """Frog panes tmux is showing right now: {pane_id: window_id it claims}.
-
-    Read off the `@claude_frog` pane option every spawn stamps on, so a frog can
-    be recognised even when no window file admits to owning him (an upgrade
-    orphan, or a pane whose state was wiped underneath it).
+    reap_legacy_panes() has a default because only tmux has a past to clean
+    up (pre-window-scoping frogs); younger surfaces have nothing to reap.
     """
-    r = _tmux("list-panes", "-a", "-F", "#{pane_id} #{@claude_frog}")
-    out = {}
-    for line in (r.stdout or "").splitlines() if r else []:
-        bits = line.split(None, 1)
-        if len(bits) == 2 and bits[1].strip():
-            out[bits[0]] = bits[1].strip()
-    return out
+
+    name = ""
+    display = ""
+
+    def inside(self):
+        raise NotImplementedError
+
+    def current_pane(self):
+        raise NotImplementedError
+
+    def window_id(self, pane=None):
+        raise NotImplementedError
+
+    def valid_window(self, win):
+        raise NotImplementedError
+
+    def window_token(self, win):
+        raise NotImplementedError
+
+    def window_from_token(self, token):
+        raise NotImplementedError
+
+    def live_panes(self):
+        raise NotImplementedError
+
+    def frog_panes(self):
+        raise NotImplementedError
+
+    def spawn_pane(self, win, near, cmd, layout):
+        raise NotImplementedError
+
+    def kill_pane(self, pane):
+        raise NotImplementedError
+
+    def reap_legacy_panes(self, win, is_ours):
+        return []
 
 
-def _window_id(pane=None):
-    """The tmux window this process is running in, e.g. "@16".
+class TmuxSurface(RenderSurface):
+    """tmux — the reference surface (and, for now, the only supported one).
 
-    Hooks are spawned by Claude Code, which inherits TMUX_PANE from the pane it
-    was launched in — so the window resolves without the caller having to know
-    it. With no pane to go on (a `run-shell` keybind), tmux's own idea of the
-    current window is the right answer.
+    The facts this class owns: the tmux command vocabulary, the "@"+digits
+    window-id format, the layout-name -> split-axis translation, and the
+    `@claude_frog` pane option every spawn stamps on so a frog pane can be
+    recognised even when no window file admits to owning him.
     """
-    if not _in_tmux():
-        return None
-    target = pane or os.environ.get("TMUX_PANE")
-    args = ["display-message", "-p"]
-    if target:
-        args += ["-t", target]
-    args.append("#{window_id}")
-    r = _tmux(*args)
-    win = (r.stdout or "").strip() if r else ""
-    return win or None
+
+    name = "tmux"
+    display = "tmux"
+
+    # Layout name -> split axis: -v stacks (top/bottom), -h sits side-by-side.
+    SPLIT_AXIS = {"bottom": "-v", "top": "-v", "right": "-h", "left": "-h"}
+
+    def inside(self):
+        return bool(os.environ.get("TMUX"))
+
+    def current_pane(self):
+        return os.environ.get("TMUX_PANE")
+
+    def window_id(self, pane=None):
+        """The tmux window this process is running in, e.g. "@16".
+
+        Hooks are spawned by the agent, which inherits TMUX_PANE from the pane
+        it was launched in — so the window resolves without the caller having
+        to know it. With no pane to go on (a `run-shell` keybind), tmux's own
+        idea of the current window is the right answer.
+        """
+        if not self.inside():
+            return None
+        target = pane or self.current_pane()
+        args = ["display-message", "-p"]
+        if target:
+            args += ["-t", target]
+        args.append("#{window_id}")
+        r = _tmux(*args)
+        win = (r.stdout or "").strip() if r else ""
+        return win or None
+
+    def valid_window(self, win):
+        """tmux window ids are "@" + digits — nothing else reaches a command
+        line."""
+        return bool(win) and win[0] == "@" and win[1:].isdigit()
+
+    def window_token(self, win):
+        # _safe_session strips the "@", leaving the digits: "@16" -> "16".
+        return _safe_session(win)
+
+    def window_from_token(self, token):
+        return "@" + token
+
+    def live_panes(self):
+        """Every pane id tmux currently knows about, across all its sessions."""
+        r = _tmux("list-panes", "-a", "-F", "#{pane_id}")
+        return set((r.stdout or "").split()) if r else set()
+
+    def frog_panes(self):
+        """Frog panes tmux is showing right now: {pane_id: window it claims},
+        read off the `@claude_frog` pane option every spawn stamps on."""
+        r = _tmux("list-panes", "-a", "-F", "#{pane_id} #{@claude_frog}")
+        out = {}
+        for line in (r.stdout or "").splitlines() if r else []:
+            bits = line.split(None, 1)
+            if len(bits) == 2 and bits[1].strip():
+                out[bits[0]] = bits[1].strip()
+        return out
+
+    def spawn_pane(self, win, near, cmd, layout):
+        """Split a stamped pane running `cmd` into `win`; return its pane id
+        (None if the split failed). `near` is the pane to split off, so the
+        frog lands beside the session that summoned him rather than beside
+        whatever the window happened to have focused.
+        """
+        axis = self.SPLIT_AXIS.get(layout, self.SPLIT_AXIS[DEFAULT_LAYOUT])
+        size = LAYOUTS.get(layout, LAYOUTS[DEFAULT_LAYOUT])
+        # -b puts the new pane *before* the target: above it for a vertical
+        # split, left of it for a horizontal one.
+        before = ["-b"] if layout in ("top", "left") else []
+        r = _tmux("split-window", axis, *before, "-l", str(size), "-d",
+                  "-t", near or win, "-P", "-F", "#{pane_id}", cmd)
+        if not (r and r.returncode == 0):
+            return None
+        pid = (r.stdout or "").strip()
+        if pid:
+            _tmux("set-option", "-p", "-t", pid, "@claude_frog", win)
+        return pid or None
+
+    def kill_pane(self, pane):
+        _tmux("kill-pane", "-t", pane)
+
+    def reap_legacy_panes(self, win, is_ours):
+        """Kill any pre-window-scoping frog still dancing in `win`.
+
+        Frogs used to be spawned per session (`dance --session`) and carry no
+        `@claude_frog` stamp, so the window bookkeeping is blind to them.
+        Upgrading mid-session would otherwise leave one of those standing next
+        to the new window-scoped frog — two frogs in one window, showing up
+        precisely when someone first tests the fix. They answer to a session
+        that no longer drives them, so there is nothing to preserve. `is_ours`
+        is the frog's own identity test for a pane's start command — the
+        surface carries the pane knowledge, the frog carries what "ours"
+        means (the same split as the settings-surgery predicate).
+        """
+        r = _tmux("list-panes", "-t", win, "-F",
+                  "#{pane_id}\t#{@claude_frog}\t#{pane_start_command}")
+        killed = []
+        for line in (r.stdout or "").splitlines() if r else []:
+            parts = line.split("\t")
+            if len(parts) != 3:
+                continue
+            pid, tag, cmd = parts
+            if not tag.strip() and is_ours(cmd):
+                self.kill_pane(pid)
+                killed.append(pid)
+        return killed
 
 
-def _valid_win(win):
-    """tmux window ids are "@" + digits. Anything else never reaches a command
-    line — the window id is derived from the environment, and this is the one
-    place that assumption gets checked."""
-    return bool(win) and win[0] == "@" and win[1:].isdigit()
+SURFACES = {s.name: s for s in (TmuxSurface(),)}
+DEFAULT_SURFACE = "tmux"
+
+
+def detect_surface():
+    """The surface hosting this process.
+
+    With tmux the sole supported surface (see the scaffolding note above)
+    this always lands on tmux; outside a tmux server every call then degrades
+    to "no window", which is exactly the paneless, statusline-only behavior
+    sessions outside tmux have always had. When a second backend earns its
+    way in, this becomes the walk-the-registry probe detect_agent() already
+    is for adapters.
+    """
+    return SURFACES[DEFAULT_SURFACE]
+
+
+SURFACE = detect_surface()
+
+
+# --------------------------------------------------------------------------- #
+# Mode: hook  (lifecycle events, via the adapter; think-state + pane life)     #
+# --------------------------------------------------------------------------- #
 
 
 def _win_path(win):
-    return os.path.join(CACHE_DIR, "win-" + _safe_session(win) + ".json")
+    return os.path.join(CACHE_DIR, "win-" + SURFACE.window_token(win) + ".json")
 
 
 class _win_lock(object):
@@ -2283,10 +2461,10 @@ def _newest_claim(sessions):
 def _prune_claims(state, live):
     """Drop claims whose Claude session is demonstrably gone.
 
-    A claim records the tmux pane Claude Code itself runs in, so liveness is a
-    fact we can check rather than a timeout we have to guess: pane gone, session
-    gone. Only claims we never resolved a pane for (Claude started outside tmux,
-    somehow) fall back to ageing out.
+    A claim records the pane the agent itself runs in, so liveness is a fact
+    we can check rather than a timeout we have to guess: pane gone, session
+    gone. Only claims we never resolved a pane for (a session started outside
+    the surface, somehow) fall back to ageing out.
     """
     cutoff = time.time() - WIN_CLAIM_STALE_SECS
     keep = {}
@@ -2304,29 +2482,11 @@ def _prune_claims(state, live):
     return state
 
 
-def _reap_legacy_panes(win):
-    """Kill any pre-window-scoping frog still dancing in `win`.
-
-    Frogs used to be spawned per session (`dance --session`) and carry no
-    `@claude_frog` tag, so the window bookkeeping is blind to them. Upgrading
-    mid-session would otherwise leave one of those standing next to the new
-    window-scoped frog — two frogs in one window, which is the exact thing this
-    is all meant to prevent, showing up precisely when someone first tests the
-    fix. They answer to a session that no longer drives them, so there is
-    nothing to preserve: kill them and let the window spawn its one frog.
-    """
-    r = _tmux("list-panes", "-t", win, "-F",
-              "#{pane_id}\t#{@claude_frog}\t#{pane_start_command}")
-    killed = []
-    for line in (r.stdout or "").splitlines() if r else []:
-        parts = line.split("\t")
-        if len(parts) != 3:
-            continue
-        pid, tag, cmd = parts
-        if not tag.strip() and "claude_frog.py" in cmd and " dance" in cmd:
-            _tmux("kill-pane", "-t", pid)
-            killed.append(pid)
-    return killed
+def _is_frog_dance_cmd(cmd):
+    """Is this pane start command one of ours? Handed to the surface's
+    legacy-pane reaper: the surface carries the pane knowledge, the frog
+    carries his own identity (same split as `_is_frog_cmd` for settings)."""
+    return "claude_frog.py" in cmd and " dance" in cmd
 
 
 def _python():
@@ -2343,11 +2503,11 @@ def _python():
 
 def _spawn_win_pane(win, near, session, layout=DEFAULT_LAYOUT,
                     theme=DEFAULT_THEME):
-    """Split a frog pane into `win` and return its pane id (None if it failed).
+    """Build the dance command and have the surface split it into a pane.
 
-    The only place a frog pane is ever created. `near` is the Claude pane to
-    split off (so he lands beside the session that summoned him rather than
-    beside whatever the window happened to have focused).
+    Returns the pane id (None if it failed). This is the frog's half of the
+    spawn — interpreter, script path, theme, prop baseline — the surface owns
+    the split itself (SURFACE.spawn_pane is the only place a pane is born).
     """
     import shlex
     py = _python()
@@ -2358,23 +2518,12 @@ def _spawn_win_pane(win, near, session, layout=DEFAULT_LAYOUT,
     # baseline is fixed before the pane exists. Reading it inside the daemon after
     # it boots would race a fast first UserPromptSubmit and eat the first prop.
     since = _read_think(session)[1]
-    # tmux runs this through a shell: quote the paths (a checkout under a
-    # directory with a space would otherwise break the spawn silently). `win` is
-    # already known to be "@"+digits.
+    # The surface runs this through a shell: quote the paths (a checkout under
+    # a directory with a space would otherwise break the spawn silently). `win`
+    # has already passed valid_window.
     cmd = (f"exec {shlex.quote(py)} {shlex.quote(here)} dance "
            f"--window {win} --theme {theme} --since {since}")
-    # -b puts the new pane *before* the target: above it for a vertical split,
-    # left of it for a horizontal one.
-    axis, size = LAYOUTS.get(layout, LAYOUTS[DEFAULT_LAYOUT])
-    before = ["-b"] if layout in ("top", "left") else []
-    r = _tmux("split-window", axis, *before, "-l", str(size), "-d",
-              "-t", near or win, "-P", "-F", "#{pane_id}", cmd)
-    if not (r and r.returncode == 0):
-        return None
-    pid = (r.stdout or "").strip()
-    if pid:
-        _tmux("set-option", "-p", "-t", pid, "@claude_frog", win)
-    return pid or None
+    return SURFACE.spawn_pane(win, near, cmd, layout)
 
 
 def _win_claim(session, layout=DEFAULT_LAYOUT, theme=DEFAULT_THEME):
@@ -2386,18 +2535,19 @@ def _win_claim(session, layout=DEFAULT_LAYOUT, theme=DEFAULT_THEME):
     `claude -p` from a subagent, a nested `claude`, a `/clear` that mints a new
     session id), the first one spawns the frog and the rest just join the
     reference count. Returns the window id, or None when there's nothing to
-    claim (no tmux).
+    claim (no surface to render on).
     """
-    win = _window_id()
-    if not _valid_win(win):
+    win = SURFACE.window_id()
+    if not SURFACE.valid_window(win):
         return None
-    mine = os.environ.get("TMUX_PANE")
+    mine = SURFACE.current_pane()
     sid = _safe_session(session)
     with _win_lock(win):
-        live = _live_panes()
+        live = SURFACE.live_panes()
         st = _prune_claims(_read_win(win), live)
         if st.get("pane") not in live:
-            _reap_legacy_panes(win)   # upgrade path: never stack on an old frog
+            # upgrade path: never stack on an old frog
+            SURFACE.reap_legacy_panes(win, _is_frog_dance_cmd)
             st["pane"] = _spawn_win_pane(win, mine, session, layout, theme)
             st["theme"], st["layout"] = theme, layout
         st["sessions"][sid] = {"ts": time.time(), "pane": mine}
@@ -2412,8 +2562,8 @@ def _win_touch(session):
     The frog shows whatever is working in the window he lives in, which is the
     only honest reading when a window holds more than one session.
     """
-    win = _window_id()
-    if not _valid_win(win):
+    win = SURFACE.window_id()
+    if not SURFACE.valid_window(win):
         return
     sid = _safe_session(session)
     with _win_lock(win):
@@ -2424,7 +2574,7 @@ def _win_touch(session):
         rec = rec if isinstance(rec, dict) else {}
         rec["ts"] = time.time()
         if not rec.get("pane"):
-            rec["pane"] = os.environ.get("TMUX_PANE")
+            rec["pane"] = SURFACE.current_pane()
         st["sessions"][sid] = rec
         st["active"] = sid
         _write_json(_win_path(win), st)
@@ -2432,12 +2582,12 @@ def _win_touch(session):
 
 def _win_release(session):
     """Drop this session's claim. The last claimant out kills the frog."""
-    win = _window_id()
-    if not _valid_win(win):
+    win = SURFACE.window_id()
+    if not SURFACE.valid_window(win):
         return
     sid = _safe_session(session)
     with _win_lock(win):
-        st = _prune_claims(_read_win(win), _live_panes())
+        st = _prune_claims(_read_win(win), SURFACE.live_panes())
         st["sessions"].pop(sid, None)
         if st["sessions"]:
             if st.get("active") == sid:
@@ -2454,7 +2604,7 @@ def _win_release(session):
 def _kill_win_pane(st):
     pid = (st or {}).get("pane")
     if pid:
-        _tmux("kill-pane", "-t", pid)
+        SURFACE.kill_pane(pid)
 
 
 def _kill_pane(session):
@@ -2471,7 +2621,7 @@ def _kill_pane(session):
             with open(pane_path) as f:
                 pid = f.read().strip()
             if pid:
-                _tmux("kill-pane", "-t", pid)
+                SURFACE.kill_pane(pid)
             os.remove(pane_path)
     except Exception:
         pass
@@ -2494,14 +2644,14 @@ def _prune_stale():
         names = os.listdir(CACHE_DIR)
     except Exception:
         return
-    live = _live_panes()
+    live = SURFACE.live_panes()
     tracked = set()          # sessions that still have a live pane
 
     for fn in names:
         if not (fn.startswith("win-") and fn.endswith(".json")):
             continue
         try:
-            win = "@" + fn[4:-5]
+            win = SURFACE.window_from_token(fn[4:-5])
             with _win_lock(win):
                 st = _prune_claims(_read_win(win), live)
                 if not st["sessions"]:
@@ -2601,17 +2751,18 @@ def mode_toggle(opts):
     hand-killed pane the stale record used to make the first keypress a silent
     no-op, so summoning him back took two presses.
     """
-    win = opts.get("window") or _window_id()
-    if not _valid_win(win):
+    win = opts.get("window") or SURFACE.window_id()
+    if not SURFACE.valid_window(win):
         sys.exit(0)
     with _win_lock(win):
-        live = _live_panes()
+        live = SURFACE.live_panes()
         st = _prune_claims(_read_win(win), live)
         if st.get("pane") in live:
             _kill_win_pane(st)
-            _reap_legacy_panes(win)  # hiding must hide every frog in the window
+            # hiding must hide every frog in the window
+            SURFACE.reap_legacy_panes(win, _is_frog_dance_cmd)
             st["pane"] = None
-        elif _reap_legacy_panes(win):
+        elif SURFACE.reap_legacy_panes(win, _is_frog_dance_cmd):
             # Nothing tracked, but a pre-upgrade frog was on screen. The keypress
             # means "hide the frog I can see" — reaping it IS the hide. Spawning
             # a replacement here would make F look like it did nothing.
@@ -2619,7 +2770,7 @@ def mode_toggle(opts):
         else:
             session = st.get("active") or _newest_claim(st["sessions"]) or "default"
             st["pane"] = _spawn_win_pane(
-                win, os.environ.get("TMUX_PANE"), session,
+                win, SURFACE.current_pane(), session,
                 opts.get("layout", DEFAULT_LAYOUT),
                 opts.get("theme", DEFAULT_THEME))
         _write_json(_win_path(win), st)
@@ -2911,6 +3062,10 @@ def mode_setup(opts):
 # Previously this was a snippet you were told to hand-paste into tmux.conf with
 # the path swapped in yourself — so in practice nobody had the keybind the
 # README advertised. The installer writes it now.
+#
+# This whole section is tmux-BACKEND integration, not frog logic: it knows
+# tmux.conf on purpose, the way the opencode adapter knows its plugin file. A
+# second rendering surface would bring its own summon story, not reuse this.
 
 
 def _tmux_conf_path():
@@ -3301,11 +3456,12 @@ def mode_doctor(opts):
                  else f"stdout encoding is {sys.stdout.encoding or 'unknown'}, "
                       "not UTF-8 — the frog is drawn in ▀/▄ half-blocks"))
 
-    in_tmux = bool(os.environ.get("TMUX"))
-    rows.append(("Dancing pane (tmux)", in_tmux, False,
-                 "in tmux — you get the full show" if in_tmux
-                 else "not in tmux — the frog lives in a tmux pane, so "
-                      "you won't see him (add tmux + WezTerm)"))
+    in_surface = SURFACE.inside()
+    rows.append((f"Dancing pane ({SURFACE.name})", in_surface, False,
+                 f"in {SURFACE.display} — you get the full show" if in_surface
+                 else f"not in {SURFACE.display} — the frog lives in a "
+                      f"{SURFACE.display} pane, so you won't see him "
+                      "(add tmux + WezTerm)"))
 
     kb = _keybind_installed()
     rows.append(("Toggle keybind", kb, False,
@@ -3313,9 +3469,9 @@ def mode_doctor(opts):
                  else "not installed — run install.sh (or `install-keybind`)"))
 
     # One frog per window is the contract; surface it if reality disagrees.
-    if in_tmux:
+    if in_surface:
         per_win = {}
-        for _pane, win in _frog_panes().items():
+        for _pane, win in SURFACE.frog_panes().items():
             per_win[win] = per_win.get(win, 0) + 1
         crowded = sorted(w for w, n in per_win.items() if n > 1)
         rows.append(("Frogs on screen", not crowded, False,
@@ -3406,7 +3562,7 @@ def _parse(argv):
         i += 1
     if opts["session"] is None:
         opts["session"] = os.environ.get("CLAUDE_FROG_SESSION")
-    if opts["window"] is not None and not _valid_win(opts["window"]):
+    if opts["window"] is not None and not SURFACE.valid_window(opts["window"]):
         opts["window"] = None
     # Both resolve through SETTINGS (flag > env > config file > default), so the
     # SessionStart hook and the tmux toggle keybind agree on an answer without

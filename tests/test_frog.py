@@ -1027,9 +1027,9 @@ class TestWindowSingleton(_WindowCase):
 
     def test_window_ids_are_validated_before_reaching_a_command_line(self):
         for bad in ("", None, "@", "1", "@1; rm -rf ~", "@1 x", "../@1"):
-            self.assertFalse(cf._valid_win(bad), bad)
-        self.assertTrue(cf._valid_win("@1"))
-        self.assertTrue(cf._valid_win("@1234"))
+            self.assertFalse(cf.SURFACE.valid_window(bad), bad)
+        self.assertTrue(cf.SURFACE.valid_window("@1"))
+        self.assertTrue(cf.SURFACE.valid_window("@1234"))
 
 
 class TestToggleIsWindowScoped(_WindowCase):
@@ -1120,6 +1120,41 @@ class TestCliModesExitZero(unittest.TestCase):
                   json.dumps({"hook_event_name": "Stop", "session_id": "t"})):
             r = self._run(["hook"], stdin=p)
             self.assertEqual(r.returncode, 0, f"hook <- {p!r}: {r.stderr}")
+
+
+class TestRenderSurface(unittest.TestCase):
+    """The surface seam: everything pane/multiplexer-specific answers through
+    SURFACE. tmux is the sole supported surface — declared scaffolding
+    (FWL-549) — so detection hard-lands on it until a second backend earns
+    its way into the registry.
+    """
+
+    def test_registry_holds_the_default_and_detection_lands_on_tmux(self):
+        self.assertIn(cf.DEFAULT_SURFACE, cf.SURFACES)
+        self.assertIsInstance(cf.detect_surface(), cf.TmuxSurface)
+        self.assertIsInstance(cf.SURFACE, cf.RenderSurface)
+
+    def test_window_tokens_round_trip_and_name_the_window_files(self):
+        s = cf.SURFACES["tmux"]
+        self.assertEqual(s.window_from_token(s.window_token("@16")), "@16")
+        # the on-disk name the bookkeeping and the stale sweep both key on
+        self.assertEqual(os.path.basename(cf._win_path("@16")), "win-16.json")
+
+    def test_outside_the_surface_there_is_no_window(self):
+        # window_id() -> None is what makes every caller degrade to the
+        # paneless, statusline-only story without checking the surface itself.
+        saved = os.environ.pop("TMUX", None)
+        try:
+            self.assertIsNone(cf.SURFACES["tmux"].window_id())
+        finally:
+            if saved is not None:
+                os.environ["TMUX"] = saved
+
+    def test_only_tmux_has_a_legacy_to_reap(self):
+        # The base class answers "nothing to reap": pre-window-scoping frogs
+        # are tmux history, and a younger surface must not have to fake it.
+        self.assertEqual(
+            cf.RenderSurface().reap_legacy_panes("@1", lambda cmd: True), [])
 
 
 class TestAgentAdapter(unittest.TestCase):

@@ -21,8 +21,10 @@ rely on it — the code is the source of truth.
   key to an `(r, g, b)` or `None` (transparent) via a palette dict. So the whole
   look of the frog is just which colors those keys resolve to.
 - **Rendering** is Unicode half-blocks (`▀` / `▄`) in 24-bit truecolor — two
-  pixels per character cell — so he's real pixel art, not ASCII. Needs a
-  truecolor terminal.
+  pixels per character cell — so he's real pixel art, not ASCII. Without a
+  truecolor terminal the palettes are quantized to xterm-256 at emission time
+  (the palette dicts themselves stay 24-bit); `NO_COLOR` drops color entirely
+  and keeps the glyphs.
 
 ## Gauges
 

@@ -28,8 +28,14 @@ import claude_frog as cf  # noqa: E402
 # Every CLI subprocess below runs with an isolated XDG_CACHE_HOME: the tap and
 # hook modes write session state under the cache dir, and without this the
 # test run pollutes the user's real ~/.cache/claude-frog (which it did).
+# Color output is pinned to truecolor so escape-sequence assertions don't
+# depend on the terminal the tests happen to run in; color-mode tests set
+# their own environment explicitly.
 _CACHE_TMP = tempfile.TemporaryDirectory(prefix="claude-frog-tests-")
-ENV = {**os.environ, "XDG_CACHE_HOME": _CACHE_TMP.name}
+ENV = {**os.environ, "XDG_CACHE_HOME": _CACHE_TMP.name,
+       "COLORTERM": "truecolor"}
+ENV.pop("NO_COLOR", None)
+cf.COLOR_MODE = "truecolor"
 
 
 def _fill_colour(bar):
@@ -1700,15 +1706,25 @@ class TestDoctor(unittest.TestCase):
             env={**ENV, **extra_env})
 
     def test_names_terminal_requirements(self):
-        # truecolor, NO_COLOR, and the half-block glyphs are requirements the
-        # renderer can't degrade around — doctor must at least name them.
+        # doctor names the terminal color rows and the half-block glyph
+        # requirement (the one thing the renderer can't degrade around).
         r = self._run_env({"NO_COLOR": "1", "COLORTERM": ""}, self._tmp_dir())
         self.assertIn("Truecolor", r.stdout)
         self.assertIn("NO_COLOR", r.stdout)
         self.assertIn("Half-blocks", r.stdout)
 
+    def test_doctor_reports_256_fallback_not_a_warning(self):
+        # a non-truecolor terminal gets the quantized fallback, and doctor
+        # says so instead of warning that colors will come out wrong.
+        r = self._run_env({"COLORTERM": "dumb"}, self._tmp_dir())
+        self.assertIn("256-color fallback", r.stdout)
+
+    def test_doctor_reports_no_color_honored(self):
+        r = self._run_env({"NO_COLOR": "1"}, self._tmp_dir())
+        self.assertIn("honored", r.stdout)
+
     def test_terminal_notes_never_fail_the_checkup(self):
-        # a hostile terminal warns but is non-critical: fully wired ⇒ exit 0.
+        # a limited terminal degrades but is non-critical: fully wired ⇒ exit 0.
         d = self._tmp_dir()
         settings = os.path.join(d, "settings.json")
         subprocess.run([sys.executable, SCRIPT, "install-settings",
@@ -1723,6 +1739,63 @@ class TestDoctor(unittest.TestCase):
             capture_output=True, text=True, timeout=15,
             env={**ENV, "NO_COLOR": "1", "COLORTERM": "dumb"})
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+
+class TestColorModes(unittest.TestCase):
+    """Truecolor, the 256-color fallback, and NO_COLOR (FWL-550)."""
+
+    def _mode(self, mode):
+        old = cf.COLOR_MODE
+        cf.COLOR_MODE = mode
+        self.addCleanup(setattr, cf, "COLOR_MODE", old)
+
+    def test_resolve_color_mode_precedence(self):
+        from unittest import mock
+        cases = (({"NO_COLOR": "1", "COLORTERM": "truecolor"}, "mono"),
+                 ({"COLORTERM": "truecolor"}, "truecolor"),
+                 ({"COLORTERM": "24bit"}, "truecolor"),
+                 ({"COLORTERM": "TrueColor"}, "truecolor"),
+                 ({"COLORTERM": "dumb"}, "256"),
+                 ({}, "256"),
+                 ({"NO_COLOR": ""}, "256"))   # empty string = unset, per spec
+        for env, want in cases:
+            with mock.patch.dict(os.environ, env, clear=True):
+                self.assertEqual(cf._resolve_color_mode(), want, env)
+
+    def test_xterm256_known_anchors(self):
+        # corners land on cube corners, an exact cube color round-trips, and
+        # mid-gray takes the gray ramp rather than a cube approximation.
+        self.assertEqual(cf._xterm256((0, 0, 0)), 16)
+        self.assertEqual(cf._xterm256((255, 255, 255)), 231)
+        self.assertEqual(cf._xterm256((95, 135, 175)), 16 + 36 * 1 + 6 * 2 + 3)
+        self.assertEqual(cf._xterm256((128, 128, 128)), 232 + 12)
+
+    def test_cell_256_mode_emits_indexed_sgr(self):
+        self._mode("256")
+        cell = cf._cell((10, 20, 30), (40, 50, 60))
+        self.assertIn("\x1b[38;5;", cell)
+        self.assertIn("\x1b[48;5;", cell)
+        self.assertNotIn(";2;", cell)
+
+    def test_cell_mono_mode_keeps_glyphs_drops_sgr(self):
+        self._mode("mono")
+        self.assertEqual(cf._cell((1, 2, 3), (4, 5, 6)), "█")
+        self.assertEqual(cf._cell((1, 2, 3), None), "▀")
+        self.assertEqual(cf._cell(None, (4, 5, 6)), "▄")
+        self.assertEqual(cf._cell(None, None), " ")
+
+    def test_gauge_bar_mono_has_glyphs_no_escapes(self):
+        self._mode("mono")
+        bar = cf._gauge_bar(100_000, 200_000, "snes")
+        self.assertNotIn("\x1b[", bar)
+        self.assertIn("▓", bar)
+        self.assertIn("░", bar)
+
+    def test_gauge_bar_256_quantizes(self):
+        self._mode("256")
+        bar = cf._gauge_bar(100_000, 200_000, "snes")
+        self.assertIn("\x1b[38;5;", bar)
+        self.assertNotIn(";2;", bar)
 
 
 class TestEnvironment(unittest.TestCase):

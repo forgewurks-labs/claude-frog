@@ -661,24 +661,91 @@ def flip_v(grid):
 
 
 # --------------------------------------------------------------------------- #
-# Half-block renderer (2 vertical pixels per character cell, truecolor)        #
+# Half-block renderer (2 vertical pixels per character cell)                   #
 # --------------------------------------------------------------------------- #
+# Colors go out at the fidelity the terminal admits to: 24-bit escapes under
+# COLORTERM=truecolor/24bit, quantized to the xterm-256 palette otherwise,
+# and suppressed entirely — glyphs only — under NO_COLOR (https://no-color.org).
 
 _UPPER = "▀"   # ▀
 _LOWER = "▄"   # ▄
+_FULL = "█"    # both pixels lit under NO_COLOR, where fg/bg can't split a cell
 _RESET = "\x1b[0m"
+
+
+def _resolve_color_mode():
+    """"truecolor" | "256" | "mono", from the environment. NO_COLOR wins."""
+    if os.environ.get("NO_COLOR"):        # any non-empty value, per the spec
+        return "mono"
+    if os.environ.get("COLORTERM", "").lower() in ("truecolor", "24bit"):
+        return "truecolor"
+    return "256"
+
+
+COLOR_MODE = _resolve_color_mode()
+
+# xterm-256: indices 16-231 are a 6×6×6 cube on these channel levels; 232-255
+# are a 24-step gray ramp (8, 18, … 238). Nearest-of-both is the quantizer.
+_CUBE = (0, 95, 135, 175, 215, 255)
+_XTERM_MEMO = {}
+
+
+def _xterm256(rgb):
+    """Nearest xterm-256 index for a 24-bit color."""
+    idx = _XTERM_MEMO.get(rgb)
+    if idx is not None:
+        return idx
+    r, g, b = rgb
+    qr, qg, qb = (min(range(6), key=lambda i: abs(_CUBE[i] - v))
+                  for v in (r, g, b))
+    cr, cg, cb = _CUBE[qr], _CUBE[qg], _CUBE[qb]
+    gi = max(0, min(23, round(((r + g + b) // 3 - 8) / 10)))
+    gv = 8 + 10 * gi
+    if ((gv - r) ** 2 + (gv - g) ** 2 + (gv - b) ** 2
+            < (cr - r) ** 2 + (cg - g) ** 2 + (cb - b) ** 2):
+        idx = 232 + gi
+    else:
+        idx = 16 + 36 * qr + 6 * qg + qb
+    _XTERM_MEMO[rgb] = idx
+    return idx
+
+
+def _fg(rgb):
+    """Foreground SGR at the current color fidelity ("" under NO_COLOR)."""
+    if COLOR_MODE == "truecolor":
+        return f"\x1b[38;2;{rgb[0]};{rgb[1]};{rgb[2]}m"
+    if COLOR_MODE == "256":
+        return f"\x1b[38;5;{_xterm256(rgb)}m"
+    return ""
+
+
+def _bg(rgb):
+    """Background SGR at the current color fidelity ("" under NO_COLOR)."""
+    if COLOR_MODE == "truecolor":
+        return f"\x1b[48;2;{rgb[0]};{rgb[1]};{rgb[2]}m"
+    if COLOR_MODE == "256":
+        return f"\x1b[48;5;{_xterm256(rgb)}m"
+    return ""
+
+
+def _sgr_reset():
+    """The reset that pairs with _fg/_bg — nothing to reset under NO_COLOR."""
+    return "" if COLOR_MODE == "mono" else _RESET
 
 
 def _cell(top, bot):
     """Render one character cell from its top/bottom pixel colors."""
     if top is None and bot is None:
         return " "
+    if COLOR_MODE == "mono":              # the glyphs alone carry the shape
+        if top is not None and bot is not None:
+            return _FULL
+        return _UPPER if top is not None else _LOWER
     if top is not None and bot is not None:
-        return (f"\x1b[38;2;{top[0]};{top[1]};{top[2]}m"
-                f"\x1b[48;2;{bot[0]};{bot[1]};{bot[2]}m{_UPPER}\x1b[0m")
+        return f"{_fg(top)}{_bg(bot)}{_UPPER}{_RESET}"
     if top is not None:
-        return f"\x1b[38;2;{top[0]};{top[1]};{top[2]}m{_UPPER}\x1b[0m"
-    return f"\x1b[38;2;{bot[0]};{bot[1]};{bot[2]}m{_LOWER}\x1b[0m"
+        return f"{_fg(top)}{_UPPER}{_RESET}"
+    return f"{_fg(bot)}{_LOWER}{_RESET}"
 
 
 def render_pixels(pixels):
@@ -2090,9 +2157,9 @@ def _gauge_bar(tokens, size, theme, fade=True):
     lit = int(round(frac * _BAR_CELLS))
     out = []
     for i in range(_BAR_CELLS):
-        r, g, b = fill_rgb if i < lit else dim_rgb
-        out.append(f"\033[38;2;{r};{g};{b}m" + ("▓" if i < lit else "░"))
-    return "".join(out) + _RESET
+        out.append(_fg(fill_rgb if i < lit else dim_rgb)
+                   + ("▓" if i < lit else "░"))
+    return "".join(out) + _sgr_reset()
 
 
 def _statusline_text(session, tokens, size, theme, fade=True):
@@ -2108,7 +2175,7 @@ def _statusline_text(session, tokens, size, theme, fade=True):
     spec = theme_spec(theme)
     rows = render_pixels(
         _colorize(grid, palette_for(tokens, theme, fade), spec["dither"]))
-    frog = (rows[0] if rows else "") + _RESET
+    frog = (rows[0] if rows else "") + _sgr_reset()
 
     parts = [frog, _gauge_bar(tokens, size, theme, fade), _fmt_tokens(tokens)]
     if size and tokens is not None:
@@ -2837,11 +2904,11 @@ TMUX_MARKER = "claude-frog toggle keybind"
 # Mode: config  (show / set / unset the persisted settings)                     #
 # --------------------------------------------------------------------------- #
 
-_C_OK = "\033[38;2;120;200;120m"
-_C_WARN = "\033[38;2;230;180;90m"
-_C_DIM = "\033[38;2;140;140;150m"
-_C_PINK = "\033[38;2;240;156;188m"
-_R = "\033[0m"
+_C_OK = _fg((120, 200, 120))
+_C_WARN = _fg((230, 180, 90))
+_C_DIM = _fg((140, 140, 150))
+_C_PINK = _fg((240, 156, 188))
+_R = _sgr_reset()
 
 
 def _config_rows():
@@ -3349,9 +3416,9 @@ def mode_doctor(opts):
     non-zero only if a *critical* piece is missing, so callers can gate on it;
     the tmux note never fails the check.
     """
-    C_OK = "\033[38;2;120;200;120m"
-    C_WARN = "\033[38;2;230;180;90m"
-    R = "\033[0m"
+    C_OK = _fg((120, 200, 120))
+    C_WARN = _fg((230, 180, 90))
+    R = _sgr_reset()
     rows = []       # (label, ok, critical, detail)
 
     py_ok = sys.version_info >= (3, 9)
@@ -3436,20 +3503,21 @@ def mode_doctor(opts):
                      f"{shown}  ({note})"
                      + (" — this is overriding your settings file" if shadowed else "")))
 
-    # Terminal requirements, declared honestly: the palettes emit 24-bit
-    # escapes with no 256-color fallback, and the frog is drawn in Unicode
-    # half-blocks — so these are requirements, not niceties.
+    # Terminal color support: the frog degrades rather than demands — 24-bit
+    # escapes under COLORTERM=truecolor/24bit, quantized to the xterm-256
+    # palette otherwise, glyphs-only under NO_COLOR. Half-block glyphs are
+    # still a real requirement (there's no ASCII frog).
     colorterm = os.environ.get("COLORTERM", "")
     truecolor = colorterm.lower() in ("truecolor", "24bit")
-    rows.append(("Truecolor", truecolor, False,
+    rows.append(("Truecolor", True, False,
                  f"COLORTERM={colorterm}" if truecolor else
-                 "COLORTERM isn't truecolor/24bit — the frog paints 24-bit "
-                 "color with no 256-color fallback, so his palette may come "
-                 "out wrong (use WezTerm, iTerm2, or Kitty)"))
+                 "COLORTERM isn't truecolor/24bit — rendering in the "
+                 "256-color fallback, so colors are approximate (WezTerm, "
+                 "iTerm2, or Kitty gets the real palette)"))
     if os.environ.get("NO_COLOR"):
-        rows.append(("NO_COLOR", False, False,
-                     "set, but the frog doesn't honor it — he renders in "
-                     "color anyway"))
+        rows.append(("NO_COLOR", True, False,
+                     "set and honored — the frog renders glyphs only, "
+                     "no color"))
     enc_utf8 = "utf8" in (sys.stdout.encoding or "").lower().replace("-", "")
     rows.append(("Half-blocks (▀▄)", enc_utf8, False,
                  "UTF-8 out — just make sure your font draws ▀/▄" if enc_utf8
